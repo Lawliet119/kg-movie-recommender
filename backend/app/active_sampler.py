@@ -120,29 +120,14 @@ class ActiveSampler:
         asked_attributes: set[str],
     ) -> Optional[dict]:
         """
-        Select the best attribute question to ask.
+        Select the best attribute question to ask using KGenSam criteria:
+        1. Information Gain (Entropy): Splits the candidates evenly.
+        2. Graph Centrality (Degree): Hub nodes on the KG are asked first.
 
-        Uses entropy-based selection:
-        1. For each attribute type (genre, director, actor)
-        2. Count how candidates distribute across attribute values
-        3. Pick the attribute value closest to 50/50 split (max info gain)
-
-        Returns:
-            {
-                "attr_type": "genre",
-                "attr_value": "Sci-Fi",
-                "attr_entity_id": "genre:sci_fi",
-                "entropy": 0.95,
-                "split_ratio": 0.48,
-                "candidate_count": 20,
-                "question_text": "Do you like Sci-Fi movies?"
-            }
+        Score = α * Entropy(info_gain) + β * Centrality(degree)
         """
         if not candidate_movies:
             return None
-
-        best_question = None
-        best_info_gain = -1.0
 
         n = len(candidate_movies)
         if n <= 1:
@@ -155,10 +140,14 @@ class ActiveSampler:
             ('person', 'starred_actors', "Do you like movies with {}?"),
         ]
 
+        evaluated_attrs = []
+        max_degree = 1
+
         for attr_type, relation, question_template in attribute_configs:
             # Count attribute distribution among candidates
             attr_counter = Counter()
             attr_movies: dict[str, set[str]] = {}
+            attr_entity_ids: dict[str, str] = {}
 
             for movie_id in candidate_movies:
                 related = self.kg.get_related(movie_id, relation)
@@ -168,14 +157,21 @@ class ActiveSampler:
                         continue  # Already asked
                     attr_counter[entity['name']] += 1
                     attr_movies.setdefault(entity['name'], set()).add(movie_id)
+                    
+                    # Store entity ID for degree calculation
+                    target_id = None
+                    for _, t, d in self.kg.graph.out_edges(movie_id, data=True):
+                        if d.get('relation') == relation and self.kg.entities[t]['name'] == entity['name']:
+                            target_id = t
+                            break
+                    if target_id:
+                        attr_entity_ids[entity['name']] = target_id
 
             # Evaluate each attribute value
             for attr_name, count in attr_counter.items():
-                # Split ratio: how close to 50/50 does this question split candidates?
                 split_ratio = count / n
 
-                # Information gain: highest when split_ratio ≈ 0.5
-                # Using binary entropy: H = -p*log2(p) - (1-p)*log2(1-p)
+                # Information gain (binary entropy)
                 if split_ratio <= 0 or split_ratio >= 1:
                     info_gain = 0.0
                 else:
@@ -184,23 +180,49 @@ class ActiveSampler:
                         + (1 - split_ratio) * math.log2(1 - split_ratio)
                     )
 
-                if info_gain > best_info_gain:
-                    best_info_gain = info_gain
+                # Node degree in KG
+                degree = 0
+                entity_id = attr_entity_ids.get(attr_name)
+                if entity_id and entity_id in self.kg.graph:
+                    # In-degree (how many movies point to this attribute)
+                    degree = self.kg.graph.in_degree(entity_id)
+                    if degree > max_degree:
+                        max_degree = degree
 
-                    # Find entity ID
-                    entity_id = self.kg.entity_name_to_id.get(attr_name.lower(), '')
+                evaluated_attrs.append({
+                    'attr_type': attr_type,
+                    'attr_value': attr_name,
+                    'attr_entity_id': entity_id or '',
+                    'relation': relation,
+                    'info_gain': info_gain,
+                    'split_ratio': split_ratio,
+                    'candidate_count': n,
+                    'movies_with_attr': count,
+                    'degree': degree,
+                    'question_text': question_template.format(attr_name),
+                })
 
-                    best_question = {
-                        'attr_type': attr_type,
-                        'attr_value': attr_name,
-                        'attr_entity_id': entity_id,
-                        'relation': relation,
-                        'entropy': round(info_gain, 4),
-                        'split_ratio': round(split_ratio, 4),
-                        'candidate_count': n,
-                        'movies_with_attr': count,
-                        'question_text': question_template.format(attr_name),
-                    }
+        if not evaluated_attrs:
+            return None
+
+        # Calculate hybrid score and find the best
+        ALPHA = 0.7  # Entropy weight
+        BETA = 0.3   # Centrality weight
+        
+        best_question = None
+        best_score = -1.0
+
+        for attr in evaluated_attrs:
+            norm_degree = attr['degree'] / max_degree if max_degree > 0 else 0
+            # Entropy is max 1.0 (at split=0.5), so scales match well
+            score = (ALPHA * attr['info_gain']) + (BETA * norm_degree)
+            
+            if score > best_score:
+                best_score = score
+                best_question = attr
+                best_question['entropy'] = round(attr['info_gain'], 4)
+                best_question['hybrid_score'] = round(score, 4)
+                best_question['centrality'] = round(norm_degree, 4)
 
         return best_question
 

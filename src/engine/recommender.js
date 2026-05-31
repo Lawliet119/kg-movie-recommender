@@ -12,6 +12,7 @@ export class RecommenderEngine {
   /** Fuzzy match entity name against KG */
   findEntity(query, type = null) {
     const q = query.toLowerCase().trim();
+    if (!q) return null;
     let bestMatch = null;
     let bestScore = 0;
 

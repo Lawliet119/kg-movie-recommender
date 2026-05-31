@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI):
     active_sampler = ActiveSampler(kg)
     fm_model = FMModel(k=16, lr=0.01, reg=0.01)
     fm_model.build_feature_index(kg)
-    fm_model.train(kg, epochs=50)
+    fm_model.train(kg, epochs=15)
 
     # 5. Create Recommender Engine (with KGenSam components)
     engine = RecommenderEngine(

@@ -75,8 +75,10 @@ elif r3['action'] == 'recommend':
 
 # If still asking, do one more turn
 if r3['action'] == 'ask':
-    session.add_preference('person', r3['question']['attr_value'], True)
-    print(f"\n=== Turn 3: Accepted {r3['question']['attr_value']} ===")
+    attr_type = r3['question']['attr_type']
+    attr_value = r3['question']['attr_value']
+    session.add_preference(attr_type, attr_value, True)
+    print(f"\n=== Turn 3: Accepted {attr_value} ===")
     r4 = engine.conversational_step(session)
     print(f"Action: {r4['action']}")
     if r4['action'] == 'recommend':
@@ -88,4 +90,4 @@ if r3['action'] == 'ask':
 
 print("\n=== Session State ===")
 print(session.to_dict())
-print("\n✅ KGenSam conversation flow test PASSED!")
+print("\n[OK] KGenSam conversation flow test PASSED!")

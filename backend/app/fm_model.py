@@ -179,9 +179,9 @@ class FMModel:
                 if not anchor_attrs:
                     continue
 
-                # Find positive and hard negative
+                # Find positive and hard negative via graph distance
                 pos_id, neg_id = self._sample_hard_pair(
-                    anchor_id, anchor_attrs, movie_ids, movie_attrs
+                    anchor_id, kg, movie_ids
                 )
                 if pos_id is None or neg_id is None:
                     continue
@@ -221,49 +221,60 @@ class FMModel:
     def _sample_hard_pair(
         self,
         anchor_id: str,
-        anchor_attrs: set[str],
+        kg,
         movie_ids: list[str],
-        movie_attrs: dict[str, set[str]],
     ) -> tuple[Optional[str], Optional[str]]:
         """
-        Sample a (positive, hard_negative) pair for BPR training.
+        Sample a (positive, hard_negative) pair for BPR training using Graph Distance.
+        According to KGenSam paper:
+        - Positive: Movies close on the graph (distance = 2, i.e., share direct attribute)
+        - Hard Negative: Movies slightly further (distance = 4, i.e., share attribute with a neighbor)
+        - Easy Negative: Distance > 4 or disconnected
 
-        - Positive: movie with highest attribute overlap (> 50%)
-        - Hard Negative: movie with moderate overlap (20-50%)
-          → forces model to distinguish subtle differences
+        We use an undirected version of the KG to compute topological hop distance.
         """
-        overlaps = []
+        import networkx as nx
+
+        # Compute distances up to 4 hops from the anchor movie
+        # Using undirected graph for traversal
+        undirected_kg = kg.graph.to_undirected()
+        
+        try:
+            distances = nx.single_source_shortest_path_length(undirected_kg, anchor_id, cutoff=4)
+        except nx.NetworkXError:
+            return None, None
+
+        pos_candidates = []
+        hard_neg_candidates = []
+
         for mid in movie_ids:
             if mid == anchor_id:
                 continue
-            other_attrs = movie_attrs.get(mid, set())
-            if not other_attrs:
-                continue
-            shared = len(anchor_attrs & other_attrs)
-            total = len(anchor_attrs | other_attrs)
-            ratio = shared / total if total > 0 else 0
-            overlaps.append((mid, ratio))
+            
+            dist = distances.get(mid, -1)
+            
+            if dist == 2:
+                # 2 hops = Anchor -> Attribute -> Candidate (shares direct attribute)
+                pos_candidates.append(mid)
+            elif dist == 4:
+                # 4 hops = Anchor -> Attr1 -> Movie2 -> Attr2 -> Candidate
+                hard_neg_candidates.append(mid)
 
-        if len(overlaps) < 2:
+        # Fallbacks if we can't find exact distance matches
+        if not pos_candidates:
             return None, None
+            
+        pos_id = np.random.choice(pos_candidates)
 
-        overlaps.sort(key=lambda x: -x[1])
-
-        # Positive: highest overlap
-        pos_id = overlaps[0][0]
-
-        # Hard negative: moderate overlap (aim for 0.2-0.5 range)
-        hard_neg = None
-        for mid, ratio in overlaps:
-            if mid == pos_id:
-                continue
-            if 0.1 <= ratio <= 0.5:
-                hard_neg = mid
-                break
-
-        # Fallback: just pick the least similar
-        if hard_neg is None:
-            hard_neg = overlaps[-1][0]
+        if hard_neg_candidates:
+            hard_neg = np.random.choice(hard_neg_candidates)
+        else:
+            # Fallback to a random easy negative (not in distances, i.e., dist > 4 or disconnected)
+            easy_negs = [m for m in movie_ids if m not in distances]
+            if easy_negs:
+                hard_neg = np.random.choice(easy_negs)
+            else:
+                return None, None
 
         return pos_id, hard_neg
 

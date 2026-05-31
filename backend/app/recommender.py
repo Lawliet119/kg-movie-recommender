@@ -11,6 +11,7 @@ Replaces: src/engine/recommender.js
 Key improvements:
 - Learned embeddings replace hand-crafted weights (0.5, 0.35, 0.2)
 - KGenSam Level 2: Conversational flow with entropy-based E&E
+- KG Deep: Graph propagation + embedding similarity in scoring
 """
 import logging
 from typing import Optional
@@ -21,8 +22,14 @@ from .semantic_nlu import SemanticNLU
 from .conversation_manager import ConversationSession
 from .active_sampler import ActiveSampler
 from .fm_model import FMModel
+from .preference_propagator import PreferencePropagator
 
 logger = logging.getLogger(__name__)
+
+# Hybrid scoring weights
+ALPHA_FM = 0.4        # FM (feature interaction) weight
+BETA_PROP = 0.35      # Graph propagation weight
+GAMMA_EMB = 0.25      # KG embedding similarity weight
 
 
 class RecommenderEngine:
@@ -31,6 +38,7 @@ class RecommenderEngine:
     1. KG Embedding similarity (learned, replaces hard-coded weights)
     2. Graph traversal for explainable paths (kept for interpretability)
     3. Semantic NLU for intent detection and entity linking
+    4. KG Propagation for implicit preference discovery
     """
 
     def __init__(
@@ -46,6 +54,7 @@ class RecommenderEngine:
         self.nlu = nlu
         self.active_sampler = active_sampler or ActiveSampler(kg)
         self.fm_model = fm_model
+        self.propagator = PreferencePropagator(kg, embedding_model)
 
     def recommend(self, movie_name: str, top_k: int = 5, mode: str = 'kg') -> dict:
         """
@@ -312,8 +321,11 @@ class RecommenderEngine:
         top_k: int = 5,
     ) -> dict:
         """
-        Build final recommendations from the conversational flow.
-        Uses FM scoring if available, otherwise attribute overlap.
+        Build final recommendations using hybrid 3-way scoring:
+          final_score = α*FM + β*propagation + γ*embedding_similarity
+
+        This ensures KG topology and learned embeddings actively
+        contribute to recommendation scoring.
         """
         if not candidates:
             return {
@@ -327,30 +339,67 @@ class RecommenderEngine:
                 },
             }
 
-        # Score candidates
+        # --- 1. FM scores ---
+        fm_scores = {}
         if self.fm_model and self.fm_model.is_trained:
-            scored = self.fm_model.rank_movies(
-                candidates, session.accepted_attributes, self.kg, top_k=top_k
+            fm_ranked = self.fm_model.rank_movies(
+                candidates, session.accepted_attributes, self.kg, top_k=len(candidates)
             )
-            scoring_method = 'fm+kgensam'
-        else:
-            # Fallback: attribute overlap scoring
-            scored = self._score_by_preference_overlap(
-                candidates, session.accepted_attributes, top_k
+            fm_scores = {mid: s for mid, s in fm_ranked}
+
+        # --- 2. Graph propagation scores ---
+        entity_pref_scores = self.propagator.propagate(
+            session.accepted_attributes,
+            session.rejected_attributes,
+            max_hops=2,
+        )
+        prop_scores = self.propagator.score_candidate_movies(
+            candidates, entity_pref_scores
+        )
+
+        # --- 3. KG embedding similarity scores ---
+        emb_scores = {}
+        for mid in candidates:
+            emb_scores[mid] = self.propagator.compute_embedding_similarity_score(
+                mid, session.accepted_attributes
             )
-            scoring_method = 'overlap+kgensam'
+
+        # --- Normalize each score set to [0, 1] ---
+        fm_scores = self._normalize_scores(fm_scores)
+        prop_scores = self._normalize_scores(prop_scores)
+        emb_scores = self._normalize_scores(emb_scores)
+
+        # --- Hybrid combination ---
+        hybrid_scores = {}
+        for mid in candidates:
+            hybrid_scores[mid] = (
+                ALPHA_FM * fm_scores.get(mid, 0.0)
+                + BETA_PROP * prop_scores.get(mid, 0.0)
+                + GAMMA_EMB * emb_scores.get(mid, 0.0)
+            )
+
+        # Sort and take top_k
+        sorted_movies = sorted(hybrid_scores.items(), key=lambda x: -x[1])
+        top_movies = sorted_movies[:top_k]
+
+        scoring_method = 'hybrid_kg_deep'
 
         # Build results with KG path explanations
         results = []
-        for movie_id, score in scored:
+        for movie_id, score in top_movies:
             entity = self.kg.entities.get(movie_id)
             if not entity:
                 continue
 
-            # Generate reasons (KG paths showing WHY this movie matches)
+            # Generate reasons: direct preferences + propagation paths
             reasons = self._generate_preference_reasons(
                 movie_id, session.accepted_attributes
             )
+            # Add propagation-based reasons (multi-hop KG reasoning)
+            prop_reasons = self.propagator.get_propagation_reasons(
+                movie_id, entity_pref_scores, top_k=2
+            )
+            reasons.extend(prop_reasons)
 
             results.append({
                 'movie': entity,
@@ -358,7 +407,9 @@ class RecommenderEngine:
                 'score': round(score, 3),
                 'reasons': reasons,
                 'paths': [],
-                'embedding_score': None,
+                'embedding_score': round(emb_scores.get(movie_id, 0.0), 3),
+                'propagation_score': round(prop_scores.get(movie_id, 0.0), 3),
+                'fm_score': round(fm_scores.get(movie_id, 0.0), 3),
             })
 
         return {
@@ -368,10 +419,24 @@ class RecommenderEngine:
             'recommendations': {
                 'results': results,
                 'method': scoring_method,
+                'scoring_weights': {'fm': ALPHA_FM, 'propagation': BETA_PROP, 'embedding': GAMMA_EMB},
                 'preferences_used': session.accepted_attributes,
                 'turns_taken': session.turn_count,
             },
         }
+
+    @staticmethod
+    def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:
+        """Normalize scores to [0, 1] range using min-max normalization."""
+        if not scores:
+            return scores
+        values = list(scores.values())
+        min_v = min(values)
+        max_v = max(values)
+        rng = max_v - min_v
+        if rng == 0:
+            return {k: 0.5 for k in scores}  # All equal → neutral
+        return {k: (v - min_v) / rng for k, v in scores.items()}
 
     def _score_by_preference_overlap(
         self,
