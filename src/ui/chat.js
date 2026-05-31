@@ -12,6 +12,10 @@ export class ChatUI {
     this.input = document.getElementById('chat-input');
     this.sendBtn = document.getElementById('send-btn');
 
+    // KGenSam conversation state
+    this.conversationSessionId = null;
+    this.conversationActive = false;
+
     this.sendBtn.addEventListener('click', () => this.handleSend());
     this.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') this.handleSend(); });
 
@@ -76,6 +80,24 @@ export class ChatUI {
     // --- Python Backend Mode ---
     if (this.backendAvailable) {
       try {
+        // Check for KGenSam conversational flow triggers
+        const lowerText = text.toLowerCase();
+        const isConversationalTrigger = (
+          !this.conversationActive &&
+          this.mode === 'kg' &&
+          (
+            /^(recommend|suggest|find|help)\s*(me\s*)?(a\s+)?(movie|film|something)/i.test(lowerText) ||
+            /^(i want|i('d)? like|show me)\s+(a\s+)?(movie|film|something|recommendation)/i.test(lowerText) ||
+            /^(what should i watch|gợi ý|đề xuất)/i.test(lowerText)
+          )
+        );
+
+        if (isConversationalTrigger) {
+          this.removeTyping();
+          await this.startConversationalFlow();
+          return;
+        }
+
         if (apiKey && this.mode === 'kg') {
           // Graph-RAG via backend
           const res = await fetch('/api/chat/rag', {
@@ -371,7 +393,10 @@ ${contextData}`;
     const backendInfo = this.backendAvailable
       ? `<br><br><span class="kg-badge with-kg" style="background:linear-gradient(135deg,#10b981,#059669);">🐍 ML Backend Active</span> Recommendations powered by <strong>KG Embeddings (RotatE/TransE)</strong> + <strong>Semantic NLU</strong>`
       : '';
-    this.addMessage(`👋 Welcome to <strong>KG Movie Recommender v2.0</strong>!<br><br>I use a <strong>Knowledge Graph</strong> with movie relationships to give you smart, explainable recommendations.<br><br>🔗 <strong>With KG:</strong> Recommendations based on shared directors, actors, genres<br>🎲 <strong>Without KG:</strong> Random baseline (no reasoning)${backendInfo}<br><br>Try the suggestions below or type your own question! 👇`, 'bot', true);
+    const kgensamInfo = this.backendAvailable
+      ? `<br><br>🧠 <strong>NEW — KGenSam Conversational Mode:</strong> Type <em>"Recommend me a movie"</em> and I'll ask smart questions to find your perfect match!<br><span style="opacity:0.6;font-size:11px;">Based on: KGenSam (Zhao et al., 2021) — Entropy-based Exploration & Exploitation</span>`
+      : '';
+    this.addMessage(`👋 Welcome to <strong>KG Movie Recommender v3.0</strong>!<br><br>I use a <strong>Knowledge Graph</strong> with movie relationships to give you smart, explainable recommendations.<br><br>🔗 <strong>With KG:</strong> Recommendations based on shared directors, actors, genres<br>🎲 <strong>Without KG:</strong> Random baseline (no reasoning)${backendInfo}${kgensamInfo}<br><br>Try the suggestions below or type your own question! 👇`, 'bot', true);
   }
 
   // --- Backend Response Renderers ---
@@ -538,5 +563,190 @@ ${contextData}`;
       // Fallback to rule-based
       this.renderBackendResponse(data);
     }
+  }
+
+  // ===================================================================
+  // KGenSam Level 2: Conversational Recommendation Flow
+  // ===================================================================
+
+  async startConversationalFlow() {
+    this.conversationActive = true;
+
+    this.addMessage(
+      `<span class="kg-badge with-kg kgensam-badge">🧠 KGenSam Conversational Mode</span><br><br>` +
+      `I'll ask you a few questions to understand your taste, then give you personalized recommendations!<br>` +
+      `<span style="opacity:0.7;font-size:12px;">Based on: KGenSam (Zhao et al., 2021) — Entropy-based E&E Policy</span>`,
+      'bot', true
+    );
+
+    try {
+      const res = await fetch('/api/conversation/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_turns: 5 }),
+      });
+      const data = await res.json();
+      this.conversationSessionId = data.session?.session_id;
+      this.renderConversationStep(data);
+    } catch (e) {
+      console.error('Failed to start conversation:', e);
+      this.conversationActive = false;
+      this.addMessage('❌ Failed to start conversational flow. Try asking directly!', 'bot', true);
+    }
+  }
+
+  renderConversationStep(data) {
+    if (data.action === 'ask' && data.question) {
+      this.renderAttributeQuestion(data);
+    } else if (data.action === 'recommend' && data.recommendations) {
+      this.renderConversationalRecommendations(data);
+      this.conversationActive = false;
+      this.conversationSessionId = null;
+    }
+  }
+
+  renderAttributeQuestion(data) {
+    const q = data.question;
+    const session = data.session;
+
+    // Progress bar
+    const progress = Math.min(session.turn_count / session.max_turns, 1);
+    const progressPct = Math.round(progress * 100);
+
+    // Preference tags for what's been collected
+    let prefTags = '';
+    const accepted = session.accepted || {};
+    for (const [type, values] of Object.entries(accepted)) {
+      for (const val of values) {
+        prefTags += `<span class="reason-tag ${type}" style="font-size:11px;margin:2px;">✓ ${val}</span>`;
+      }
+    }
+
+    const html = `
+      <div class="conversation-question-card">
+        <div class="conversation-progress">
+          <div class="conversation-progress-bar" style="width: ${progressPct}%"></div>
+          <span class="conversation-progress-text">Question ${session.turn_count + 1}/${session.max_turns} · ${session.candidate_count} movies remaining</span>
+        </div>
+        ${prefTags ? `<div class="conversation-prefs">${prefTags}</div>` : ''}
+        <div class="conversation-question-text">${q.question_text}</div>
+        <div class="conversation-question-meta">
+          <span style="opacity:0.6;font-size:11px;">Entropy: ${q.entropy} · Split: ${Math.round(q.split_ratio * 100)}% · ${q.movies_with_attr}/${q.candidate_count} movies</span>
+        </div>
+        <div class="conversation-buttons">
+          <button class="conversation-btn accept" data-attr-type="${q.attr_type}" data-attr-value="${q.attr_value}" data-accepted="true">
+            ✅ Yes, I like it!
+          </button>
+          <button class="conversation-btn reject" data-attr-type="${q.attr_type}" data-attr-value="${q.attr_value}" data-accepted="false">
+            ❌ Not really
+          </button>
+        </div>
+      </div>
+    `;
+
+    const msg = this.addMessage(html, 'bot', true);
+
+    // Attach event listeners
+    msg.querySelectorAll('.conversation-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const accepted = e.currentTarget.dataset.accepted === 'true';
+        const attrType = e.currentTarget.dataset.attrType;
+        const attrValue = e.currentTarget.dataset.attrValue;
+
+        // Disable buttons
+        msg.querySelectorAll('.conversation-btn').forEach(b => {
+          b.disabled = true;
+          b.style.opacity = '0.5';
+        });
+        // Highlight selected
+        e.currentTarget.style.opacity = '1';
+        e.currentTarget.classList.add('selected');
+
+        // Show user's choice
+        const choiceText = accepted ? `✅ Yes, I like ${attrValue}` : `❌ No, not ${attrValue}`;
+        this.addMessage(choiceText, 'user', true);
+
+        await this.handleConversationAnswer(attrType, attrValue, accepted);
+      });
+    });
+  }
+
+  async handleConversationAnswer(attrType, attrValue, accepted) {
+    this.showTyping();
+
+    try {
+      const res = await fetch('/api/conversation/answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: this.conversationSessionId,
+          attr_type: attrType,
+          attr_value: attrValue,
+          accepted: accepted,
+        }),
+      });
+      const data = await res.json();
+      this.removeTyping();
+      this.renderConversationStep(data);
+    } catch (e) {
+      this.removeTyping();
+      console.error('Conversation answer failed:', e);
+      this.addMessage('❌ Something went wrong. Let me try regular recommendations instead.', 'bot', true);
+      this.conversationActive = false;
+    }
+  }
+
+  renderConversationalRecommendations(data) {
+    const recs = data.recommendations;
+    const session = data.session;
+
+    if (recs.error) {
+      this.addMessage(`🤔 ${recs.error}`, 'bot', true);
+      return;
+    }
+
+    // Badge
+    const methodLabel = recs.method === 'fm+kgensam' ? '🧠 FM + KGenSam' : '🔗 KGenSam';
+    let html = `<span class="kg-badge with-kg kgensam-badge">${methodLabel}</span><br><br>`;
+
+    // Summary
+    html += `After <strong>${recs.turns_taken || session.turn_count}</strong> questions, `;
+    html += `here are your personalized recommendations:<br><br>`;
+
+    // Preference summary
+    const prefs = recs.preferences_used || session.accepted || {};
+    let prefHtml = '';
+    for (const [type, values] of Object.entries(prefs)) {
+      for (const val of values) {
+        prefHtml += `<span class="reason-tag ${type}" style="font-size:11px;margin:2px;">✓ ${val}</span>`;
+      }
+    }
+    if (prefHtml) {
+      html += `<div style="margin-bottom:12px;"><span style="opacity:0.7;font-size:12px;">Your preferences:</span><br>${prefHtml}</div>`;
+    }
+
+    // Movie cards
+    for (let i = 0; i < recs.results.length; i++) {
+      const r = recs.results[i];
+      const scoreHtml = r.score !== null && r.score !== undefined
+        ? `<span class="rec-score">${Number(r.score).toFixed(3)}</span>`
+        : '';
+
+      html += `<div class="recommendation-card">`;
+      html += `<div class="rec-header"><span class="rec-title">${i + 1}. ${r.movie.name}</span>${scoreHtml}</div>`;
+
+      if (r.reasons && r.reasons.length > 0) {
+        html += `<div class="rec-reasons">`;
+        for (const reason of r.reasons) {
+          html += `<span class="reason-tag ${reason.type}">${reason.text}</span>`;
+        }
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+
+    html += `<br><span style="opacity:0.6;font-size:11px;">Method: ${recs.method} · Turns: ${recs.turns_taken || session.turn_count}</span>`;
+
+    this.addMessage(html, 'bot', true);
   }
 }

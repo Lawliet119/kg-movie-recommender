@@ -795,3 +795,171 @@ body {
   border: 1px solid rgba(244, 63, 94, 0.2);
   color: var(--accent-rose);
 }
+
+/* ========================================
+   KGenSam Conversational UI Styles
+   ======================================== */
+
+.kgensam-badge {
+  background: linear-gradient(135deg, #7c3aed, #2563eb) !important;
+  border: 1px solid rgba(124, 58, 237, 0.3) !important;
+  color: #fff !important;
+  animation: kgensamPulse 3s ease-in-out infinite;
+}
+
+@keyframes kgensamPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.2); }
+  50% { box-shadow: 0 0 12px 2px rgba(124, 58, 237, 0.15); }
+}
+
+/* Question Card */
+.conversation-question-card {
+  background: rgba(124, 58, 237, 0.06);
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  margin-top: 8px;
+  animation: questionSlideIn 0.4s ease-out;
+}
+
+@keyframes questionSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Progress Bar */
+.conversation-progress {
+  position: relative;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 11px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.conversation-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-purple), var(--accent-blue), var(--accent-cyan));
+  border-radius: 11px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  min-width: 4px;
+}
+
+.conversation-progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  letter-spacing: 0.03em;
+}
+
+/* Preferences collected */
+.conversation-prefs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+/* Question Text */
+.conversation-question-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+
+.conversation-question-meta {
+  margin-bottom: 14px;
+}
+
+/* Accept / Reject Buttons */
+.conversation-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+.conversation-btn {
+  flex: 1;
+  padding: 10px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+}
+
+.conversation-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.conversation-btn.accept:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: var(--accent-green);
+}
+
+.conversation-btn.reject:hover:not(:disabled) {
+  background: rgba(244, 63, 94, 0.15);
+  border-color: rgba(244, 63, 94, 0.3);
+  color: var(--accent-rose);
+}
+
+.conversation-btn.selected {
+  animation: selectedPulse 0.5s ease;
+}
+
+.conversation-btn.accept.selected {
+  background: rgba(16, 185, 129, 0.2) !important;
+  border-color: var(--accent-green) !important;
+  color: var(--accent-green) !important;
+  opacity: 1 !important;
+}
+
+.conversation-btn.reject.selected {
+  background: rgba(244, 63, 94, 0.2) !important;
+  border-color: var(--accent-rose) !important;
+  color: var(--accent-rose) !important;
+  opacity: 1 !important;
+}
+
+@keyframes selectedPulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+
+.conversation-btn:disabled {
+  cursor: default;
+}
+
+/* Reason tag for person type (used in KGenSam preferences) */
+.reason-tag.person {
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  color: var(--accent-cyan);
+}
+
+.reason-tag.year {
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  color: var(--accent-blue);
+}

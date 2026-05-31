@@ -33,7 +33,7 @@
       </div>
       <div class="header-right">
         <div class="api-key-container" style="margin-right: 15px;">
-          <input type="password" id="gemini-api-key" value="AIzaSyCDU2Xh-jrBGZBbQJbe4jV7c0Uek1O7ku0" placeholder="Enter Gemini API Key for RAG..." autocomplete="off" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 6px 12px; color: white; font-family: 'Inter', sans-serif; font-size: 13px; outline: none; width: 220px;" />
+          <input type="password" id="gemini-api-key" value="" placeholder="Enter Gemini API Key for RAG..." autocomplete="off" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 6px 12px; color: white; font-family: 'Inter', sans-serif; font-size: 13px; outline: none; width: 220px;" />
         </div>
         <div class="mode-toggle" id="mode-toggle">
           <button class="mode-btn active" data-mode="kg" id="btn-kg-mode">
@@ -78,6 +78,7 @@
           </div>
           <div class="input-suggestions" id="suggestions">
             <button class="suggestion-chip" data-query="Recommend movies like Inception">🎬 Like Inception</button>
+            <button class="suggestion-chip" data-query="Recommend me a movie">🧠 KGenSam Flow</button>
             <button class="suggestion-chip" data-query="Show me sci-fi movies">🚀 Sci-Fi movies</button>
             <button class="suggestion-chip" data-query="Movies directed by Christopher Nolan">🎥 Nolan films</button>
             <button class="suggestion-chip" data-query="Tell me about The Matrix">📖 About The Matrix</button>

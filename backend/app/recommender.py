@@ -1,13 +1,16 @@
 """
-Enhanced Recommender Engine — Combines KG Embeddings + Graph Traversal.
+Enhanced Recommender Engine — Combines KG Embeddings + Graph Traversal + KGenSam.
 
 Based on:
 - KGLA (2024): KG paths as recommendation rationale
 - SURGE (ACL 2023): Subgraph retrieval for grounded generation
 - ConceptFlow (ACL 2020): Guided traversal in KG
+- KGenSam (Zhao et al., 2021): KG-enhanced sampling for conversational rec
 
 Replaces: src/engine/recommender.js
-Key improvement: Learned embeddings replace hand-crafted weights (0.5, 0.35, 0.2)
+Key improvements:
+- Learned embeddings replace hand-crafted weights (0.5, 0.35, 0.2)
+- KGenSam Level 2: Conversational flow with entropy-based E&E
 """
 import logging
 from typing import Optional
@@ -15,6 +18,9 @@ from typing import Optional
 from .kg_builder import KnowledgeGraph
 from .kg_embeddings import KGEmbeddingModel
 from .semantic_nlu import SemanticNLU
+from .conversation_manager import ConversationSession
+from .active_sampler import ActiveSampler
+from .fm_model import FMModel
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +38,14 @@ class RecommenderEngine:
         kg: KnowledgeGraph,
         embedding_model: KGEmbeddingModel,
         nlu: SemanticNLU,
+        active_sampler: Optional[ActiveSampler] = None,
+        fm_model: Optional[FMModel] = None,
     ):
         self.kg = kg
         self.embeddings = embedding_model
         self.nlu = nlu
+        self.active_sampler = active_sampler or ActiveSampler(kg)
+        self.fm_model = fm_model
 
     def recommend(self, movie_name: str, top_k: int = 5, mode: str = 'kg') -> dict:
         """
@@ -193,6 +203,225 @@ class RecommenderEngine:
             'results': results,
             'method': 'random_baseline',
         }
+
+    # ===================================================================
+    # KGenSam Level 2: Conversational Recommendation Flow
+    # ===================================================================
+
+    def conversational_step(self, session: ConversationSession) -> dict:
+        """
+        Execute one step of the KGenSam conversational recommendation flow.
+
+        Conversation Policy (heuristic, replaces RL):
+        1. Compute candidate movies based on current preferences
+        2. Compute entropy of candidate set
+        3. Decide: ASK (explore) or RECOMMEND (exploit)
+
+        Returns:
+            {
+                "action": "ask" | "recommend",
+                "session": {session_state},
+                "question": {question_data} | None,
+                "recommendations": [{rec_data}] | None,
+            }
+        """
+        # 1. Get candidate movies given current preferences
+        candidates = self.active_sampler.get_candidate_movies(
+            session.accepted_attributes,
+            session.rejected_attributes,
+        )
+        session.candidate_movies = candidates
+
+        # 2. Compute entropy
+        entropy = self.active_sampler.compute_candidate_entropy(candidates)
+        session.last_entropy = entropy
+
+        # 3. Apply conversation policy
+        action = self._apply_conversation_policy(session, candidates, entropy)
+        session.should_recommend = (action == 'recommend')
+
+        if action == 'ask':
+            # Select best question using entropy-based active sampling
+            question = self.active_sampler.select_question(
+                candidates, session.asked_attributes
+            )
+
+            if question is None:
+                # No more questions to ask → recommend
+                return self._build_conversational_recommendations(session, candidates)
+
+            session.last_question = question
+
+            return {
+                'action': 'ask',
+                'session': session.to_dict(),
+                'question': question,
+                'recommendations': None,
+            }
+        else:
+            return self._build_conversational_recommendations(session, candidates)
+
+    def _apply_conversation_policy(
+        self,
+        session: ConversationSession,
+        candidates: list[str],
+        entropy: float,
+    ) -> str:
+        """
+        KGenSam-inspired conversation policy (heuristic).
+
+        Decides whether to ASK another question or RECOMMEND.
+
+        Rules:
+        1. Always ask at least 1 question (turn 0)
+        2. If max turns reached → recommend
+        3. If very few candidates (≤ top_k) → recommend
+        4. If entropy is low enough → recommend (confident enough)
+        5. Otherwise → ask
+        """
+        ENTROPY_THRESHOLD = 1.5  # Below this → confident enough to recommend
+        MIN_CANDIDATES_TO_ASK = 6  # If fewer candidates, just recommend
+
+        # Rule 1: Always ask at least once
+        if session.turn_count == 0:
+            return 'ask'
+
+        # Rule 2: Max turns reached
+        if session.turn_count >= session.max_turns:
+            logger.info(f"📊 Policy: RECOMMEND (max turns {session.max_turns} reached)")
+            return 'recommend'
+
+        # Rule 3: Few candidates left
+        if len(candidates) <= MIN_CANDIDATES_TO_ASK:
+            logger.info(f"📊 Policy: RECOMMEND (only {len(candidates)} candidates)")
+            return 'recommend'
+
+        # Rule 4: Entropy check
+        if entropy < ENTROPY_THRESHOLD:
+            logger.info(f"📊 Policy: RECOMMEND (entropy={entropy:.3f} < {ENTROPY_THRESHOLD})")
+            return 'recommend'
+
+        # Rule 5: Still uncertain → ask more
+        logger.info(f"📊 Policy: ASK (entropy={entropy:.3f}, candidates={len(candidates)})")
+        return 'ask'
+
+    def _build_conversational_recommendations(
+        self,
+        session: ConversationSession,
+        candidates: list[str],
+        top_k: int = 5,
+    ) -> dict:
+        """
+        Build final recommendations from the conversational flow.
+        Uses FM scoring if available, otherwise attribute overlap.
+        """
+        if not candidates:
+            return {
+                'action': 'recommend',
+                'session': session.to_dict(),
+                'question': None,
+                'recommendations': {
+                    'results': [],
+                    'method': 'kgensam_conversational',
+                    'error': 'No movies match your preferences. Try a new conversation!',
+                },
+            }
+
+        # Score candidates
+        if self.fm_model and self.fm_model.is_trained:
+            scored = self.fm_model.rank_movies(
+                candidates, session.accepted_attributes, self.kg, top_k=top_k
+            )
+            scoring_method = 'fm+kgensam'
+        else:
+            # Fallback: attribute overlap scoring
+            scored = self._score_by_preference_overlap(
+                candidates, session.accepted_attributes, top_k
+            )
+            scoring_method = 'overlap+kgensam'
+
+        # Build results with KG path explanations
+        results = []
+        for movie_id, score in scored:
+            entity = self.kg.entities.get(movie_id)
+            if not entity:
+                continue
+
+            # Generate reasons (KG paths showing WHY this movie matches)
+            reasons = self._generate_preference_reasons(
+                movie_id, session.accepted_attributes
+            )
+
+            results.append({
+                'movie': entity,
+                'info': self.kg.get_movie_info(movie_id),
+                'score': round(score, 3),
+                'reasons': reasons,
+                'paths': [],
+                'embedding_score': None,
+            })
+
+        return {
+            'action': 'recommend',
+            'session': session.to_dict(),
+            'question': None,
+            'recommendations': {
+                'results': results,
+                'method': scoring_method,
+                'preferences_used': session.accepted_attributes,
+                'turns_taken': session.turn_count,
+            },
+        }
+
+    def _score_by_preference_overlap(
+        self,
+        candidates: list[str],
+        accepted: dict[str, list[str]],
+        top_k: int = 5,
+    ) -> list[tuple[str, float]]:
+        """Fallback scoring: count attribute overlap with preferences."""
+        accepted_set = set()
+        for attr_type, values in accepted.items():
+            for val in values:
+                accepted_set.add(f"{attr_type}:{val}")
+
+        scores = []
+        for mid in candidates:
+            movie_attrs = set()
+            for rel, atype in [('has_genre', 'genre'), ('directed_by', 'person'),
+                               ('starred_actors', 'person'), ('release_year', 'year')]:
+                for e in self.kg.get_related(mid, rel):
+                    movie_attrs.add(f"{atype}:{e['name']}")
+
+            overlap = len(accepted_set & movie_attrs)
+            total = max(len(accepted_set), 1)
+            scores.append((mid, overlap / total))
+
+        scores.sort(key=lambda x: -x[1])
+        return scores[:top_k]
+
+    def _generate_preference_reasons(
+        self,
+        movie_id: str,
+        accepted: dict[str, list[str]],
+    ) -> list[dict]:
+        """Generate explainable reasons based on user preferences."""
+        reasons = []
+
+        for genre in accepted.get('genre', []):
+            genres = self.kg.get_related(movie_id, 'has_genre')
+            if any(g['name'].lower() == genre.lower() for g in genres):
+                reasons.append({'type': 'genre', 'text': f'Matches your taste: {genre}'})
+
+        for person in accepted.get('person', []):
+            directors = self.kg.get_related(movie_id, 'directed_by')
+            actors = self.kg.get_related(movie_id, 'starred_actors')
+            if any(d['name'].lower() == person.lower() for d in directors):
+                reasons.append({'type': 'director', 'text': f'Directed by {person} (your pick)'})
+            if any(a['name'].lower() == person.lower() for a in actors):
+                reasons.append({'type': 'actor', 'text': f'Stars {person} (your pick)'})
+
+        return reasons
 
     def process_chat(self, message: str, mode: str = 'kg') -> dict:
         """

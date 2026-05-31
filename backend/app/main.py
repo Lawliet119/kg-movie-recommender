@@ -3,12 +3,15 @@ FastAPI Backend — KG Movie Recommender API
 Serves the ML-powered recommendation engine to the frontend.
 
 Endpoints:
-  GET  /api/stats          — KG statistics
-  POST /api/recommend      — Get recommendations
-  POST /api/chat           — Process chat message
-  POST /api/chat/rag       — Graph-RAG with Gemini
-  GET  /api/entity/{id}    — Entity info + neighbors
-  POST /api/train          — Trigger embedding training
+  GET  /api/stats                      — KG statistics
+  POST /api/recommend                  — Get recommendations
+  POST /api/chat                       — Process chat message
+  POST /api/chat/rag                   — Graph-RAG with Gemini
+  GET  /api/entity/{id}                — Entity info + neighbors
+  POST /api/train                      — Trigger embedding training
+  POST /api/conversation/start         — Start KGenSam conversational flow
+  POST /api/conversation/answer        — Answer attribute question
+  GET  /api/conversation/{session_id}  — Get session state
 """
 import os
 import logging
@@ -24,6 +27,9 @@ from .kg_builder import KnowledgeGraph, build_knowledge_graph, load_kb_file
 from .kg_embeddings import KGEmbeddingModel
 from .semantic_nlu import SemanticNLU
 from .recommender import RecommenderEngine
+from .conversation_manager import SessionStore
+from .active_sampler import ActiveSampler
+from .fm_model import FMModel
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
@@ -34,6 +40,8 @@ kg: KnowledgeGraph
 embedding_model: KGEmbeddingModel
 nlu: SemanticNLU
 engine: RecommenderEngine
+session_store: SessionStore
+fm_model: FMModel
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_DIR = os.path.dirname(BACKEND_DIR)
@@ -44,7 +52,7 @@ EMBEDDINGS_DIR = os.path.join(BACKEND_DIR, 'trained_models', 'kg_embeddings')
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global kg, embedding_model, nlu, engine
+    global kg, embedding_model, nlu, engine, session_store, fm_model
 
     logger.info("🚀 Starting KG Movie Recommender Backend...")
 
@@ -72,10 +80,22 @@ async def lifespan(app: FastAPI):
     nlu = SemanticNLU(model_name='all-MiniLM-L6-v2')
     nlu.initialize(kg.entities)
 
-    # 4. Create Recommender Engine
-    engine = RecommenderEngine(kg, embedding_model, nlu)
+    # 4. Initialize KGenSam components
+    logger.info("🎯 Initializing KGenSam components...")
+    session_store = SessionStore(expire_seconds=1800)
+    active_sampler = ActiveSampler(kg)
+    fm_model = FMModel(k=16, lr=0.01, reg=0.01)
+    fm_model.build_feature_index(kg)
+    fm_model.train(kg, epochs=50)
 
-    logger.info("✅ All systems ready!")
+    # 5. Create Recommender Engine (with KGenSam components)
+    engine = RecommenderEngine(
+        kg, embedding_model, nlu,
+        active_sampler=active_sampler,
+        fm_model=fm_model,
+    )
+
+    logger.info("✅ All systems ready! (KGenSam Level 2 enabled)")
     yield
     logger.info("👋 Shutting down...")
 
@@ -119,6 +139,18 @@ class TrainRequest(BaseModel):
     epochs: int = 200
     model_name: str = 'RotatE'
     embedding_dim: int = 128
+
+
+class ConversationStartRequest(BaseModel):
+    max_turns: int = 5
+
+
+class ConversationAnswerRequest(BaseModel):
+    session_id: str
+    accepted: bool
+    # attr_type and attr_value are provided by the question
+    attr_type: str
+    attr_value: str
 
 
 # --- API Endpoints ---
@@ -287,4 +319,63 @@ async def health():
         'kg_loaded': kg is not None,
         'embeddings_trained': embedding_model.is_trained,
         'nlu_ready': nlu.is_ready,
+        'kgensam_enabled': True,
+        'fm_trained': fm_model.is_trained if fm_model else False,
+        'active_sessions': session_store.active_count if session_store else 0,
+    }
+
+
+# --- KGenSam Conversational Endpoints ---
+
+@app.post("/api/conversation/start")
+async def conversation_start(req: ConversationStartRequest):
+    """
+    Start a new KGenSam conversational recommendation session.
+
+    Returns the first attribute question chosen by entropy-based active sampling.
+    The system picks the question that most efficiently narrows down the candidate set.
+    """
+    session = session_store.create()
+    session.max_turns = req.max_turns
+
+    # Execute first conversation step
+    result = engine.conversational_step(session)
+
+    return result
+
+
+@app.post("/api/conversation/answer")
+async def conversation_answer(req: ConversationAnswerRequest):
+    """
+    Process user's answer to an attribute question.
+
+    Records the preference and decides:
+    - ASK: another question (if still uncertain)
+    - RECOMMEND: final recommendations (if confident enough)
+
+    This implements the KGenSam E&E (Exploitation & Exploration) policy.
+    """
+    session = session_store.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    # Record user's answer
+    session.add_preference(req.attr_type, req.attr_value, req.accepted)
+
+    # Execute next conversation step
+    result = engine.conversational_step(session)
+
+    return result
+
+
+@app.get("/api/conversation/{session_id}")
+async def conversation_status(session_id: str):
+    """Get current state of a conversation session."""
+    session = session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    return {
+        'session': session.to_dict(),
+        'candidate_count': len(session.candidate_movies),
     }
