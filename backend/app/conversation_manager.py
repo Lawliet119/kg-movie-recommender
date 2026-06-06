@@ -52,6 +52,7 @@ class ConversationSession:
     should_recommend: bool = False
     last_question: Optional[dict] = None
     last_entropy: float = 1.0
+    last_policy: Optional[dict] = None
 
     def touch(self):
         """Update last active timestamp."""
@@ -103,6 +104,7 @@ class ConversationSession:
             'candidate_count': len(self.candidate_movies),
             'should_recommend': self.should_recommend,
             'last_entropy': round(self.last_entropy, 4),
+            'last_policy': self.last_policy,
         }
 
 

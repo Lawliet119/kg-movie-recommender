@@ -10,7 +10,8 @@ import json
 import logging
 import numpy as np
 import torch
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,13 @@ class KGEmbeddingModel:
         self.relation_to_id: dict[str, int] = {}
         self.entity_embeddings: Optional[np.ndarray] = None
         self._trained = False
+        self.metadata: dict = {}
 
     @property
     def is_trained(self) -> bool:
         return self._trained
 
-    def train(self, triples: list[list[str]], epochs: int = 200):
+    def train(self, triples: list[list[str]], epochs: int = 200, force_fallback: bool = False):
         """
         Train KG embeddings on triples.
 
@@ -45,6 +47,11 @@ class KGEmbeddingModel:
             triples: List of [head_id, relation, tail_id]
             epochs: Number of training epochs
         """
+        if force_fallback:
+            logger.info("Using sparse SVD KG embeddings for fast large-KG startup.")
+            self._train_fallback(triples)
+            return
+
         try:
             from pykeen.triples import TriplesFactory
             from pykeen.pipeline import pipeline
@@ -95,6 +102,7 @@ class KGEmbeddingModel:
             if np.iscomplexobj(self.entity_embeddings):
                 self.entity_embeddings = np.abs(self.entity_embeddings)
 
+        self.metadata = self._build_metadata(triples, method=self.model_name, epochs=epochs)
         self._trained = True
         logger.info(f"✅ Training complete! Embeddings shape: {self.entity_embeddings.shape}")
 
@@ -103,7 +111,8 @@ class KGEmbeddingModel:
         Fallback: compute co-occurrence-based embeddings when PyKEEN is unavailable.
         Uses SVD on adjacency matrix — still better than hand-crafted weights.
         """
-        from collections import defaultdict
+        from scipy.sparse import coo_matrix
+        from sklearn.decomposition import TruncatedSVD
 
         # Build entity list
         entities = set()
@@ -115,18 +124,24 @@ class KGEmbeddingModel:
         self.id_to_entity = {i: e for e, i in self.entity_to_id.items()}
 
         n = len(entity_list)
-        # Build adjacency matrix
-        adj = np.zeros((n, n), dtype=np.float32)
-        for h, _, t in triples:
+        rows = []
+        cols = []
+        data = []
+        relations = set()
+        for h, relation, t in triples:
             hi, ti = self.entity_to_id[h], self.entity_to_id[t]
-            adj[hi][ti] = 1.0
-            adj[ti][hi] = 1.0  # symmetric
+            rows.extend([hi, ti])
+            cols.extend([ti, hi])
+            data.extend([1.0, 1.0])
+            relations.add(relation)
+        self.relation_to_id = {relation: i for i, relation in enumerate(sorted(relations))}
 
-        # SVD dimensionality reduction
-        dim = min(self.embedding_dim, n - 1)
-        U, S, _ = np.linalg.svd(adj, full_matrices=False)
-        self.entity_embeddings = U[:, :dim] * np.sqrt(S[:dim])
+        adj = coo_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float32).tocsr()
+        dim = min(self.embedding_dim, max(n - 1, 1), 128)
+        svd = TruncatedSVD(n_components=dim, random_state=42)
+        self.entity_embeddings = svd.fit_transform(adj).astype(np.float32)
 
+        self.metadata = self._build_metadata(triples, method="sparse_svd", epochs=0)
         self._trained = True
         logger.info(f"✅ Fallback embeddings computed (SVD). Shape: {self.entity_embeddings.shape}")
 
@@ -196,9 +211,16 @@ class KGEmbeddingModel:
             json.dump(self.entity_to_id, f)
         with open(os.path.join(path, 'relation_to_id.json'), 'w') as f:
             json.dump(self.relation_to_id, f)
+        with open(os.path.join(path, 'metadata.json'), 'w') as f:
+            json.dump(self.metadata, f, indent=2)
         logger.info(f"💾 Saved embeddings to {path}")
 
-    def load(self, path: str) -> bool:
+    def load(
+        self,
+        path: str,
+        expected_entities: Optional[Iterable[str]] = None,
+        min_coverage: float = 0.98,
+    ) -> bool:
         """Load pre-trained embeddings from disk."""
         emb_path = os.path.join(path, 'embeddings.npy')
         ent_path = os.path.join(path, 'entity_to_id.json')
@@ -207,11 +229,53 @@ class KGEmbeddingModel:
         self.entity_embeddings = np.load(emb_path)
         with open(ent_path, 'r') as f:
             self.entity_to_id = json.load(f)
+        if expected_entities is not None:
+            coverage = self.coverage(expected_entities)
+            if coverage < min_coverage:
+                logger.warning(
+                    "Cached KG embeddings coverage is too low: "
+                    f"{coverage:.3f} < {min_coverage:.3f}. Retraining required."
+                )
+                self.entity_embeddings = None
+                self.entity_to_id = {}
+                self.id_to_entity = {}
+                self.relation_to_id = {}
+                self._trained = False
+                return False
         self.id_to_entity = {v: k for k, v in self.entity_to_id.items()}
         rel_path = os.path.join(path, 'relation_to_id.json')
         if os.path.exists(rel_path):
             with open(rel_path, 'r') as f:
                 self.relation_to_id = json.load(f)
+        metadata_path = os.path.join(path, 'metadata.json')
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'r') as f:
+                self.metadata = json.load(f)
+        else:
+            self.metadata = {}
         self._trained = True
         logger.info(f"📂 Loaded embeddings from {path}, shape: {self.entity_embeddings.shape}")
         return True
+
+    def coverage(self, entity_ids: Iterable[str]) -> float:
+        expected = set(entity_ids)
+        if not expected:
+            return 1.0
+        if not self.entity_to_id:
+            return 0.0
+        matched = sum(1 for entity_id in expected if entity_id in self.entity_to_id)
+        return matched / len(expected)
+
+    def _build_metadata(self, triples: list[list[str]], method: str, epochs: int) -> dict:
+        embedding_dim = self.embedding_dim
+        if self.entity_embeddings is not None and len(self.entity_embeddings.shape) == 2:
+            embedding_dim = int(self.entity_embeddings.shape[1])
+        return {
+            "method": method,
+            "embedding_dim": embedding_dim,
+            "entity_count": len(self.entity_to_id),
+            "relation_count": len(self.relation_to_id),
+            "triple_count": len(triples),
+            "epochs": epochs,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }

@@ -23,6 +23,7 @@ from .conversation_manager import ConversationSession
 from .active_sampler import ActiveSampler
 from .fm_model import FMModel
 from .preference_propagator import PreferencePropagator
+from .interact_policy import InteractPolicyNetwork
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class RecommenderEngine:
         nlu: SemanticNLU,
         active_sampler: Optional[ActiveSampler] = None,
         fm_model: Optional[FMModel] = None,
+        interact_policy: Optional[InteractPolicyNetwork] = None,
     ):
         self.kg = kg
         self.embeddings = embedding_model
@@ -55,6 +57,9 @@ class RecommenderEngine:
         self.active_sampler = active_sampler or ActiveSampler(kg)
         self.fm_model = fm_model
         self.propagator = PreferencePropagator(kg, embedding_model)
+        self.interact_policy = interact_policy or InteractPolicyNetwork(max_movie_count=len(kg.movie_ids))
+        if not self.interact_policy.is_trained:
+            self.interact_policy.train_bootstrap()
 
     def recommend(self, movie_name: str, top_k: int = 5, mode: str = 'kg') -> dict:
         """
@@ -276,6 +281,27 @@ class RecommenderEngine:
         candidates: list[str],
         entropy: float,
     ) -> str:
+        if self.interact_policy:
+            try:
+                decision = self.interact_policy.select_action(session, candidates, entropy)
+                session.last_policy = {
+                    'method': 'bootstrap_dqn',
+                    'action': decision.action,
+                    'q_ask': round(decision.q_ask, 4),
+                    'q_recommend': round(decision.q_recommend, 4),
+                    'guard': decision.guard,
+                }
+                logger.info(
+                    "DQN Policy: "
+                    f"{decision.action.upper()} "
+                    f"(q_ask={decision.q_ask:.3f}, q_rec={decision.q_recommend:.3f}, "
+                    f"guard={decision.guard})"
+                )
+                return decision.action
+            except Exception as e:
+                logger.warning(f"Interact policy failed, using fallback heuristic: {e}")
+                session.last_policy = {'method': 'fallback_heuristic', 'error': str(e)}
+
         """
         KGenSam-inspired conversation policy (heuristic).
 

@@ -46,3 +46,7 @@ ENV/
 bin/
 lib/
 include/
+
+# Local datasets
+data/movielens/
+data/_downloads/

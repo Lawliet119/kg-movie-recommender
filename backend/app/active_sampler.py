@@ -12,8 +12,11 @@ Simplified: Entropy heuristic replaces DQN-based RL agent
 """
 import math
 import logging
+import numpy as np
 from typing import Optional
 from collections import Counter
+
+from .active_policy import ActivePolicyNetwork
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +29,15 @@ class ActiveSampler:
     selects the attribute question that maximizes information gain.
     """
 
-    def __init__(self, kg):
+    def __init__(self, kg, active_policy: Optional[ActivePolicyNetwork] = None):
         """
         Args:
             kg: KnowledgeGraph instance with entities, adjacency, etc.
         """
         self.kg = kg
+        self.active_policy = active_policy or ActivePolicyNetwork()
+        if not self.active_policy.is_trained:
+            self.active_policy.train_bootstrap()
 
     def get_candidate_movies(
         self,
@@ -194,6 +200,8 @@ class ActiveSampler:
                     'attr_value': attr_name,
                     'attr_entity_id': entity_id or '',
                     'relation': relation,
+                    '_attr_uid': f"{relation}:{attr_type}:{attr_name}",
+                    '_movie_ids': attr_movies.get(attr_name, set()),
                     'info_gain': info_gain,
                     'split_ratio': split_ratio,
                     'candidate_count': n,
@@ -208,6 +216,39 @@ class ActiveSampler:
         # Calculate hybrid score and find the best
         ALPHA = 0.7  # Entropy weight
         BETA = 0.3   # Centrality weight
+
+        for attr in evaluated_attrs:
+            norm_degree = attr['degree'] / max_degree if max_degree > 0 else 0
+            attr['entropy'] = round(attr['info_gain'], 4)
+            attr['centrality'] = round(norm_degree, 4)
+            attr['hybrid_score'] = round((ALPHA * attr['info_gain']) + (BETA * norm_degree), 4)
+
+        try:
+            policy_pool = sorted(
+                evaluated_attrs,
+                key=lambda item: item['hybrid_score'],
+                reverse=True,
+            )[:512]
+            features = self._build_policy_features(policy_pool)
+            adjacency = self._build_policy_adjacency(policy_pool)
+            policy_result = self.active_policy.select(features, adjacency)
+            best_index = self._select_blended_policy_index(policy_pool, policy_result.probabilities)
+            best_question = policy_pool[best_index]
+            gcn_score = policy_result.scores[best_index] if best_index < len(policy_result.scores) else 0.0
+            gcn_probability = policy_result.probabilities[best_index]
+            best_question['gcn_score'] = round(gcn_score, 4)
+            best_question['active_score'] = round(best_question.get('active_score', best_question['hybrid_score']), 4)
+            best_question['active_policy'] = {
+                'method': 'bootstrap_gcn',
+                'pool_size': len(policy_pool),
+                'selected_probability': round(gcn_probability, 4),
+                'raw_gcn_index': policy_result.index,
+                **self.active_policy.metadata,
+            }
+            self._strip_internal_fields(best_question)
+            return best_question
+        except Exception as e:
+            logger.warning(f"Active policy failed, using entropy fallback: {e}")
         
         best_question = None
         best_score = -1.0
@@ -224,7 +265,70 @@ class ActiveSampler:
                 best_question['hybrid_score'] = round(score, 4)
                 best_question['centrality'] = round(norm_degree, 4)
 
+        if best_question:
+            best_question['active_policy'] = {'method': 'entropy_fallback'}
+            self._strip_internal_fields(best_question)
         return best_question
+
+    def _build_policy_features(self, attrs: list[dict]) -> np.ndarray:
+        features = []
+        for attr in attrs:
+            split_ratio = float(attr.get('split_ratio', 0.0))
+            uncertainty = 1.0 - min(abs(split_ratio - 0.5) * 2.0, 1.0)
+            attr_type = attr.get('attr_type', '')
+            relation = attr.get('relation', '')
+            features.append([
+                float(attr.get('info_gain', 0.0)),
+                float(attr.get('centrality', 0.0)),
+                split_ratio,
+                uncertainty,
+                float(attr.get('movies_with_attr', 0)) / max(float(attr.get('candidate_count', 1)), 1.0),
+                1.0 if attr_type == 'genre' else 0.0,
+                1.0 if attr_type == 'person' else 0.0,
+                1.0 if relation == 'directed_by' else 0.0,
+                1.0 if relation == 'starred_actors' else 0.0,
+                1.0,
+            ])
+        return np.asarray(features, dtype=np.float32)
+
+    def _build_policy_adjacency(self, attrs: list[dict]) -> np.ndarray:
+        n = len(attrs)
+        adjacency = np.eye(n, dtype=np.float32)
+        if n > 192:
+            return adjacency
+
+        movie_sets = [attr.get('_movie_ids', set()) for attr in attrs]
+        for i in range(n):
+            left = movie_sets[i]
+            if not left:
+                continue
+            for j in range(i + 1, n):
+                right = movie_sets[j]
+                if right and left.intersection(right):
+                    adjacency[i, j] = 1.0
+                    adjacency[j, i] = 1.0
+        return adjacency
+
+    def _select_blended_policy_index(self, attrs: list[dict], probabilities: list[float]) -> int:
+        if not attrs:
+            raise ValueError("No attributes to select")
+        pool_size = max(len(attrs), 1)
+        best_index = 0
+        best_score = -1.0
+        for i, attr in enumerate(attrs):
+            policy_signal = probabilities[i] * pool_size if i < len(probabilities) else 0.0
+            policy_signal = max(0.0, min(1.0, policy_signal))
+            score = (0.70 * float(attr.get('hybrid_score', 0.0))) + (0.30 * policy_signal)
+            attr['active_score'] = score
+            if score > best_score:
+                best_score = score
+                best_index = i
+        return best_index
+
+    @staticmethod
+    def _strip_internal_fields(question: dict):
+        question.pop('_movie_ids', None)
+        question.pop('_attr_uid', None)
 
     def compute_candidate_entropy(self, candidate_movies: list[str]) -> float:
         """

@@ -8,6 +8,8 @@ from backend.app.active_sampler import ActiveSampler
 from backend.app.fm_model import FMModel
 from backend.app.recommender import RecommenderEngine
 from backend.app.conversation_manager import SessionStore
+from backend.app.interaction_data import build_synthetic_interaction_data
+from backend.app.negative_sampler import NegativeSampler
 
 # Build KG
 kg = build_knowledge_graph()
@@ -18,10 +20,16 @@ emb = KGEmbeddingModel()
 emb._train_fallback(kg.to_triples_list())
 
 # Train FM
+interaction_data = build_synthetic_interaction_data(kg)
+negative_sampler = NegativeSampler(kg, interaction_data)
 fm = FMModel(k=8, lr=0.01, reg=0.01)
-fm.build_feature_index(kg)
-fm.train(kg, epochs=20)
-print(f"FM trained: {fm.is_trained}")
+fm.build_feature_index(kg, interaction_data=interaction_data)
+fm.train(kg, epochs=20, interaction_data=interaction_data, negative_sampler=negative_sampler)
+print(
+    f"FM trained: {fm.is_trained} "
+    f"(users={len(interaction_data.users)}, OI={len(interaction_data.oi_pairs)}, "
+    f"OA={len(interaction_data.oa_pairs)})"
+)
 
 # Create engine
 sampler = ActiveSampler(kg)

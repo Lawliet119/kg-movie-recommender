@@ -19,6 +19,9 @@ import logging
 import numpy as np
 from typing import Optional
 
+from .interaction_data import InteractionData
+from .negative_sampler import NegativeSampler
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +65,7 @@ class FMModel:
     def is_trained(self) -> bool:
         return self._trained
 
-    def build_feature_index(self, kg):
+    def build_feature_index(self, kg, interaction_data: Optional[InteractionData] = None):
         """
         Build feature index from KG entities.
         Each attribute (genre, person, year) gets a feature index.
@@ -76,8 +79,38 @@ class FMModel:
                     self.idx_to_feature[idx] = feature_key
                     idx += 1
 
+        if interaction_data:
+            for user_id in sorted(interaction_data.users):
+                feature_key = f"user:{user_id}"
+                if feature_key not in self.feature_to_idx:
+                    self.feature_to_idx[feature_key] = idx
+                    self.idx_to_feature[idx] = feature_key
+                    idx += 1
+
         self.n_features = idx
         logger.info(f"📊 FM feature index built: {self.n_features} features")
+
+    def _ensure_user_features(self, interaction_data: InteractionData):
+        """Add user features when interaction data arrives after initial indexing."""
+        old_n = self.n_features
+        idx = old_n
+
+        for user_id in sorted(interaction_data.users):
+            feature_key = f"user:{user_id}"
+            if feature_key not in self.feature_to_idx:
+                self.feature_to_idx[feature_key] = idx
+                self.idx_to_feature[idx] = feature_key
+                idx += 1
+
+        if idx == old_n:
+            return
+
+        self.n_features = idx
+        if self.w is not None:
+            self.w = np.pad(self.w, (0, self.n_features - old_n))
+        if self.V is not None:
+            extra = np.random.randn(self.n_features - old_n, self.k).astype(np.float32) * 0.01
+            self.V = np.vstack([self.V, extra])
 
     def _encode_movie(self, movie_id: str, kg) -> np.ndarray:
         """Encode a movie's attributes as a feature vector."""
@@ -106,6 +139,22 @@ class FMModel:
 
         return x
 
+    def _encode_user(self, user_id: str) -> np.ndarray:
+        """Encode a user id as a sparse FM feature."""
+        x = np.zeros(self.n_features, dtype=np.float32)
+        idx = self.feature_to_idx.get(f"user:{user_id}")
+        if idx is not None:
+            x[idx] = 1.0
+        return x
+
+    def _encode_attribute_key(self, attr_key: str) -> np.ndarray:
+        """Encode an attribute key like 'genre:Drama' as a sparse FM feature."""
+        x = np.zeros(self.n_features, dtype=np.float32)
+        idx = self.feature_to_idx.get(attr_key)
+        if idx is not None:
+            x[idx] = 1.0
+        return x
+
     def _predict(self, x: np.ndarray) -> float:
         """
         FM prediction: ŷ = w₀ + Σ wᵢxᵢ + Σ <vᵢ,vⱼ> xᵢxⱼ
@@ -131,7 +180,13 @@ class FMModel:
             exp_x = np.exp(x)
             return exp_x / (1.0 + exp_x)
 
-    def train(self, kg, epochs: int = 50):
+    def train(
+        self,
+        kg,
+        epochs: int = 50,
+        interaction_data: Optional[InteractionData] = None,
+        negative_sampler: Optional[NegativeSampler] = None,
+    ):
         """
         Train FM on KG movie data using BPR (Bayesian Personalized Ranking)
         with hard negative sampling.
@@ -141,7 +196,9 @@ class FMModel:
         - Hard Negative: movies sharing SOME but not ALL attributes
         """
         if self.n_features == 0:
-            self.build_feature_index(kg)
+            self.build_feature_index(kg, interaction_data=interaction_data)
+        elif interaction_data:
+            self._ensure_user_features(interaction_data)
 
         # Initialize parameters
         self.w0 = 0.0
@@ -157,6 +214,18 @@ class FMModel:
 
         # Pre-encode all movies
         movie_vectors = {mid: self._encode_movie(mid, kg) for mid in movie_ids}
+
+        if interaction_data:
+            self._train_from_interactions(
+                kg=kg,
+                interaction_data=interaction_data,
+                negative_sampler=negative_sampler or NegativeSampler(kg, interaction_data),
+                movie_vectors=movie_vectors,
+                epochs=epochs,
+            )
+            self._trained = True
+            logger.info("FM interaction training complete")
+            return
 
         # Pre-compute attribute overlap for hard negative sampling
         movie_attrs: dict[str, set[str]] = {}
@@ -217,6 +286,82 @@ class FMModel:
 
         self._trained = True
         logger.info(f"✅ FM training complete!")
+
+    def _train_from_interactions(
+        self,
+        kg,
+        interaction_data: InteractionData,
+        negative_sampler: NegativeSampler,
+        movie_vectors: dict[str, np.ndarray],
+        epochs: int,
+    ):
+        """
+        Train FM using KGenSam-shaped OI/OA pairwise data.
+
+        OI ranks (user, positive item) above (user, sampled negative item).
+        OA ranks (user, positive attribute) above (user, negative attribute).
+        """
+        if not interaction_data.oi_pairs:
+            logger.warning("No OI pairs available; skipping interaction FM training")
+            return
+
+        logger.info(
+            "Training FM with interaction data: "
+            f"users={len(interaction_data.users)}, "
+            f"OI={len(interaction_data.oi_pairs)}, "
+            f"OA={len(interaction_data.oa_pairs)}, "
+            f"epochs={epochs}"
+        )
+
+        for epoch in range(epochs):
+            total_loss = 0.0
+            n_updates = 0
+
+            for user_id, pos_item, fallback_neg in interaction_data.oi_pairs:
+                sample = negative_sampler.sample_one(user_id, pos_item)
+                neg_item = sample.negative_item if sample else fallback_neg
+                if pos_item not in movie_vectors or neg_item not in movie_vectors:
+                    continue
+
+                user_vec = self._encode_user(user_id)
+                x_pos = user_vec + movie_vectors[pos_item]
+                x_neg = user_vec + movie_vectors[neg_item]
+                total_loss += self._bpr_update(x_pos, x_neg)
+                n_updates += 1
+
+            for user_id, pos_attr, neg_attr in interaction_data.oa_pairs:
+                user_vec = self._encode_user(user_id)
+                x_pos = user_vec + self._encode_attribute_key(pos_attr)
+                x_neg = user_vec + self._encode_attribute_key(neg_attr)
+                if np.count_nonzero(x_pos) <= 1 or np.count_nonzero(x_neg) <= 1:
+                    continue
+
+                total_loss += self._bpr_update(x_pos, x_neg)
+                n_updates += 1
+
+            if n_updates > 0 and (epoch + 1) % 5 == 0:
+                logger.info(
+                    f"  Interaction epoch {epoch + 1}/{epochs}: "
+                    f"avg_loss={total_loss / n_updates:.4f}"
+                )
+
+    def _bpr_update(self, x_pos: np.ndarray, x_neg: np.ndarray) -> float:
+        """Apply one BPR SGD update and return loss."""
+        y_pos = self._predict(x_pos)
+        y_neg = self._predict(x_neg)
+        diff = y_pos - y_neg
+        sig = self._sigmoid(-diff)
+        loss = -np.log(self._sigmoid(diff) + 1e-8)
+
+        self.w += self.lr * (sig * (x_pos - x_neg) - self.reg * self.w)
+
+        for f in range(self.k):
+            vf = self.V[:, f]
+            grad_pos = x_pos * (vf @ x_pos) - (vf * x_pos ** 2)
+            grad_neg = x_neg * (vf @ x_neg) - (vf * x_neg ** 2)
+            self.V[:, f] += self.lr * (sig * (grad_pos - grad_neg) - self.reg * vf)
+
+        return float(loss)
 
     def _sample_hard_pair(
         self,

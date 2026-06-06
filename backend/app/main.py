@@ -30,6 +30,11 @@ from .recommender import RecommenderEngine
 from .conversation_manager import SessionStore
 from .active_sampler import ActiveSampler
 from .fm_model import FMModel
+from .interaction_data import build_synthetic_interaction_data
+from .movielens_kg import load_movielens_movie_triples
+from .movielens_loader import load_movielens_interaction_data
+from .negative_sampler import NegativeSampler
+from .evaluation import EvaluationConfig, EvaluationRunner
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
@@ -41,24 +46,40 @@ embedding_model: KGEmbeddingModel
 nlu: SemanticNLU
 engine: RecommenderEngine
 session_store: SessionStore
+active_sampler: ActiveSampler
 fm_model: FMModel
+interaction_data = None
+negative_sampler: NegativeSampler
+kg_source_metadata = {}
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_DIR = os.path.dirname(BACKEND_DIR)
 KB_PATH = os.path.join(PROJECT_DIR, 'scripts', 'kb.txt')
 EMBEDDINGS_DIR = os.path.join(BACKEND_DIR, 'trained_models', 'kg_embeddings')
+MOVIELENS_DIR = os.path.join(PROJECT_DIR, 'data', 'movielens')
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global kg, embedding_model, nlu, engine, session_store, fm_model
+    global kg, embedding_model, nlu, engine, session_store, active_sampler, fm_model, interaction_data, negative_sampler, kg_source_metadata
 
     logger.info("🚀 Starting KG Movie Recommender Backend...")
 
     # 1. Build Knowledge Graph
     logger.info("📦 Building Knowledge Graph...")
     raw_triples = load_kb_file(KB_PATH, top_n=200)
+    movielens_triples, movielens_kg_metadata = load_movielens_movie_triples(MOVIELENS_DIR)
+    if movielens_triples:
+        raw_triples = raw_triples + movielens_triples
+        kg_source_metadata = movielens_kg_metadata
+        logger.info(
+            "Expanded KG with MovieLens movies: "
+            f"movies={movielens_kg_metadata['movies']}, "
+            f"triples={movielens_kg_metadata['triples']}"
+        )
+    else:
+        kg_source_metadata = movielens_kg_metadata
     kg = build_knowledge_graph(raw_triples)
     logger.info(f"📊 KG Stats: {kg.stats}")
 
@@ -67,10 +88,11 @@ async def lifespan(app: FastAPI):
     embedding_model = KGEmbeddingModel(embedding_dim=128, model_name='RotatE')
 
     # Try to load pre-trained, otherwise train new
-    if not embedding_model.load(EMBEDDINGS_DIR):
+    if not embedding_model.load(EMBEDDINGS_DIR, expected_entities=kg.entities.keys()):
         logger.info("🏋️ No pre-trained embeddings found. Training...")
         triples_list = kg.to_triples_list()
-        embedding_model.train(triples_list, epochs=100)
+        use_fast_fallback = len(kg.entities) > 5000
+        embedding_model.train(triples_list, epochs=100, force_fallback=use_fast_fallback)
         embedding_model.save(EMBEDDINGS_DIR)
     else:
         logger.info("📂 Loaded pre-trained embeddings!")
@@ -84,9 +106,39 @@ async def lifespan(app: FastAPI):
     logger.info("🎯 Initializing KGenSam components...")
     session_store = SessionStore(expire_seconds=1800)
     active_sampler = ActiveSampler(kg)
+    interaction_data = load_movielens_interaction_data(
+        kg,
+        MOVIELENS_DIR,
+        max_users=250,
+        max_positive_items_per_user=20,
+        max_oi_pairs=2000,
+        max_oa_pairs=4000,
+    )
+    if interaction_data:
+        logger.info(
+            "Loaded MovieLens interactions: "
+            f"users={len(interaction_data.users)}, "
+            f"OI={len(interaction_data.oi_pairs)}, "
+            f"OA={len(interaction_data.oa_pairs)}"
+        )
+    else:
+        interaction_data = build_synthetic_interaction_data(kg)
+        logger.info(
+            "Using synthetic interactions: "
+            f"users={len(interaction_data.users)}, "
+            f"OI={len(interaction_data.oi_pairs)}, "
+            f"OA={len(interaction_data.oa_pairs)}"
+        )
+    negative_sampler = NegativeSampler(kg, interaction_data)
     fm_model = FMModel(k=16, lr=0.01, reg=0.01)
-    fm_model.build_feature_index(kg)
-    fm_model.train(kg, epochs=15)
+    fm_model.build_feature_index(kg, interaction_data=interaction_data)
+    fm_epochs = 2 if interaction_data.source == "movielens" else 15
+    fm_model.train(
+        kg,
+        epochs=fm_epochs,
+        interaction_data=interaction_data,
+        negative_sampler=negative_sampler,
+    )
 
     # 5. Create Recommender Engine (with KGenSam components)
     engine = RecommenderEngine(
@@ -151,6 +203,13 @@ class ConversationAnswerRequest(BaseModel):
     # attr_type and attr_value are provided by the question
     attr_type: str
     attr_value: str
+
+
+class EvaluationRequest(BaseModel):
+    max_users: int = 20
+    max_turns: int = 5
+    max_candidate_pool: int = 200
+    seed: int = 42
 
 
 # --- API Endpoints ---
@@ -318,11 +377,33 @@ async def health():
         'status': 'ok',
         'kg_loaded': kg is not None,
         'embeddings_trained': embedding_model.is_trained,
+        'embedding_coverage': embedding_model.coverage(kg.entities.keys()) if embedding_model else 0.0,
+        'embedding_metadata': embedding_model.metadata if embedding_model else {},
         'nlu_ready': nlu.is_ready,
         'kgensam_enabled': True,
+        'active_policy': active_sampler.active_policy.metadata if active_sampler else {},
+        'interact_policy': engine.interact_policy.metadata if engine and engine.interact_policy else {},
+        'kg_source_metadata': kg_source_metadata,
         'fm_trained': fm_model.is_trained if fm_model else False,
+        'interaction_source': interaction_data.source if interaction_data else None,
+        'interaction_users': len(interaction_data.users) if interaction_data else 0,
+        'oi_pairs': len(interaction_data.oi_pairs) if interaction_data else 0,
+        'oa_pairs': len(interaction_data.oa_pairs) if interaction_data else 0,
+        'interaction_metadata': interaction_data.metadata if interaction_data else {},
         'active_sessions': session_store.active_count if session_store else 0,
     }
+
+
+@app.post("/api/evaluate")
+async def evaluate(req: EvaluationRequest):
+    """Run offline CRS evaluation with the MovieLens/user-profile simulator."""
+    runner = EvaluationRunner(engine, interaction_data)
+    return runner.run(EvaluationConfig(
+        max_users=req.max_users,
+        max_turns=req.max_turns,
+        max_candidate_pool=req.max_candidate_pool,
+        seed=req.seed,
+    ))
 
 
 # --- KGenSam Conversational Endpoints ---
