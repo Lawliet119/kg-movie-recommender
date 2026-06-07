@@ -598,7 +598,7 @@ ${contextData}`;
       const res = await fetch('/api/conversation/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ max_turns: 5 }),
+        body: JSON.stringify({ max_turns: 5, min_ask_turns: 3 }),
       });
       const data = await res.json();
       this.conversationSessionId = data.session?.session_id;
@@ -612,6 +612,15 @@ ${contextData}`;
   }
 
   renderConversationStep(data) {
+    if (data.feedback?.type === 'item' && data.feedback.accepted === false) {
+      const softRejected = data.feedback.soft_rejected_attributes || {};
+      const signals = Object.values(softRejected).flat().filter(Boolean).slice(0, 5);
+      const signalText = signals.length
+        ? ` I will down-rank similar signals: ${signals.map(v => this.escapeHtml(v)).join(', ')}.`
+        : '';
+      this.addMessage(`Got it.${signalText}`, 'bot', true);
+    }
+
     if (data.action === 'ask' && data.question) {
       this.emitLiveSession('ask', {
         question: data.question,
@@ -660,7 +669,7 @@ ${contextData}`;
       <div class="conversation-question-card">
         <div class="conversation-progress">
           <div class="conversation-progress-bar" style="width: ${progressPct}%"></div>
-          <span class="conversation-progress-text">Question ${session.turn_count + 1}/${session.max_turns} · ${session.candidate_count} movies remaining</span>
+          <span class="conversation-progress-text">Question ${session.turn_count + 1}/${session.max_turns} · min ${session.min_ask_turns || 1} asks · ${session.candidate_count} movies remaining</span>
         </div>
         ${prefTags ? `<div class="conversation-prefs">${prefTags}</div>` : ''}
         <div class="conversation-question-text">${q.question_text}</div>

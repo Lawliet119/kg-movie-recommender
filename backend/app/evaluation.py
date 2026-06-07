@@ -21,6 +21,7 @@ class EvaluationConfig:
     max_turns: int = 5
     max_candidate_pool: int = 200
     seed: int = 42
+    recommendation_mode: str = "hybrid_kg"
 
 
 class EvaluationRunner:
@@ -50,6 +51,7 @@ class EvaluationRunner:
                 "max_turns": config.max_turns,
                 "max_candidate_pool": config.max_candidate_pool,
                 "seed": config.seed,
+                "recommendation_mode": config.recommendation_mode,
             },
             "dataset": {
                 "source": self.interaction_data.source,
@@ -124,10 +126,12 @@ class EvaluationRunner:
 
             if action == "recommend" or session.turn_count >= config.max_turns:
                 recommend_count += 1
-                recs = self.engine._build_conversational_recommendations(
+                recs = self._build_recommendation_results(
                     session,
                     list(candidates),
-                ).get("recommendations", {}).get("results", [])
+                    config,
+                    user_id,
+                )
 
                 for rec in recs:
                     movie_id = rec["movie"]["id"]
@@ -154,8 +158,56 @@ class EvaluationRunner:
             "accepted_recommendation": accepted_recommendation,
             "positive_items": len(profile.positive_items),
             "candidate_pool_size": len(candidate_pool),
+            "recommendation_mode": config.recommendation_mode,
             "trace": trace[:6],
         }
+
+    def _build_recommendation_results(
+        self,
+        session: ConversationSession,
+        candidates: list[str],
+        config: EvaluationConfig,
+        user_id: str,
+    ) -> list[dict]:
+        if config.recommendation_mode == "random_no_kg":
+            rng = random.Random(f"{config.seed}:{user_id}:{session.turn_count}:random_no_kg")
+            pool = [mid for mid in candidates if mid not in session.recommended_movies]
+            rng.shuffle(pool)
+            results = []
+            for movie_id in pool[:5]:
+                entity = self.engine.kg.entities.get(movie_id)
+                if entity:
+                    results.append({
+                        "movie": entity,
+                        "score": None,
+                        "method": "random_no_kg",
+                    })
+            return results
+
+        if config.recommendation_mode == "fm_only":
+            ranked = []
+            if self.engine.fm_model and self.engine.fm_model.is_trained:
+                ranked = self.engine.fm_model.rank_movies(
+                    candidates,
+                    session.accepted_attributes,
+                    self.engine.kg,
+                    top_k=5,
+                )
+            results = []
+            for movie_id, score in ranked:
+                entity = self.engine.kg.entities.get(movie_id)
+                if entity:
+                    results.append({
+                        "movie": entity,
+                        "score": round(float(score), 4),
+                        "method": "fm_only",
+                    })
+            return results
+
+        return self.engine._build_conversational_recommendations(
+            session,
+            candidates,
+        ).get("recommendations", {}).get("results", [])
 
     def _build_candidate_pool(self, profile, config: EvaluationConfig) -> set[str]:
         pool = set(profile.positive_items) | set(profile.negative_items)

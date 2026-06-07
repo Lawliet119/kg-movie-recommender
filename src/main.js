@@ -199,6 +199,7 @@ function renderLiveSession(state, elements) {
 function setupEvaluationPanel(backendAvailable) {
   const runBtn = document.getElementById('btn-run-evaluation');
   const ablationBtn = document.getElementById('btn-run-ablation');
+  const benchmarkBtn = document.getElementById('btn-run-benchmark');
   if (!runBtn) return;
 
   const statusEl = document.getElementById('evaluation-status');
@@ -211,6 +212,7 @@ function setupEvaluationPanel(backendAvailable) {
   if (!backendAvailable) {
     runBtn.disabled = true;
     if (ablationBtn) ablationBtn.disabled = true;
+    if (benchmarkBtn) benchmarkBtn.disabled = true;
     statusEl.textContent = 'Backend unavailable: evaluation disabled';
     return;
   }
@@ -226,11 +228,12 @@ function setupEvaluationPanel(backendAvailable) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          max_users: 5,
-          max_turns: 5,
-          max_candidate_pool: 150,
-          seed: 42,
-        }),
+            max_users: 5,
+            max_turns: 5,
+            max_candidate_pool: 150,
+            seed: 42,
+            recommendation_mode: 'hybrid_kg',
+          }),
       });
       const data = await res.json();
       const metrics = data.metrics || {};
@@ -277,20 +280,23 @@ function setupEvaluationPanel(backendAvailable) {
             max_candidate_pool: 120,
             seed: 42,
             random_fm_epochs: 1,
+            baseline_fm_epochs: 1,
           }),
         });
         const data = await res.json();
-        const hard = data.results?.find(item => item.sampler === 'learned_negative_current');
+        const learned = data.results?.find(item => item.sampler === 'learned_negative_current');
+        const hard = data.results?.find(item => item.sampler === 'hard_negative_baseline');
         const random = data.results?.find(item => item.sampler === 'random_negative_baseline');
-        if (hard?.metrics) {
-          srEl.textContent = formatMetric(hard.metrics.sr_at_t);
-          turnsEl.textContent = formatMetric(hard.metrics.average_turns);
-          asksEl.textContent = formatMetric(hard.metrics.average_asks);
-          recsEl.textContent = formatMetric(hard.metrics.average_recommends);
+        if (learned?.metrics) {
+          srEl.textContent = formatMetric(learned.metrics.sr_at_t);
+          turnsEl.textContent = formatMetric(learned.metrics.average_turns);
+          asksEl.textContent = formatMetric(learned.metrics.average_asks);
+          recsEl.textContent = formatMetric(learned.metrics.average_recommends);
         }
         statusEl.textContent = `Ablation aggregate: top cards show learned sampler Â· ${data.elapsed_seconds || 0}s`;
         traceEl.textContent =
-          `Learned negative: SR@T=${formatMetric(hard?.metrics?.sr_at_t)}, turns=${formatMetric(hard?.metrics?.average_turns)}, asks=${formatMetric(hard?.metrics?.average_asks)} | ` +
+          `Learned negative: SR@T=${formatMetric(learned?.metrics?.sr_at_t)}, turns=${formatMetric(learned?.metrics?.average_turns)}, asks=${formatMetric(learned?.metrics?.average_asks)} | ` +
+          `Hard negative: SR@T=${formatMetric(hard?.metrics?.sr_at_t)}, turns=${formatMetric(hard?.metrics?.average_turns)}, asks=${formatMetric(hard?.metrics?.average_asks)} | ` +
           `Random baseline: SR@T=${formatMetric(random?.metrics?.sr_at_t)}, turns=${formatMetric(random?.metrics?.average_turns)}, asks=${formatMetric(random?.metrics?.average_asks)}`;
       } catch (e) {
         console.error('Negative sampler ablation failed:', e);
@@ -298,6 +304,52 @@ function setupEvaluationPanel(backendAvailable) {
       } finally {
         ablationBtn.disabled = false;
         ablationBtn.textContent = 'Ablation';
+      }
+      });
+  }
+
+  if (benchmarkBtn) {
+    benchmarkBtn.addEventListener('click', async () => {
+      benchmarkBtn.disabled = true;
+      benchmarkBtn.textContent = 'Running';
+      statusEl.textContent = 'Running multi-seed benchmark: 3 variants x 3 seeds...';
+      traceEl.textContent = '';
+
+      try {
+        const res = await fetch(`${API_BASE}/evaluate/benchmark`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            max_users: 6,
+            max_turns: 5,
+            max_candidate_pool: 150,
+            seeds: [42, 43, 44],
+            include_no_kg: true,
+            include_fm_only: true,
+            save_artifacts: true,
+          }),
+        });
+        const data = await res.json();
+        const withKg = data.summary?.find(item => item.variant === 'with_kg_hybrid');
+        const noKg = data.summary?.find(item => item.variant === 'no_kg_random');
+        const fmOnly = data.summary?.find(item => item.variant === 'fm_only');
+        const metrics = withKg?.metrics || {};
+
+        srEl.textContent = formatMetric(metrics.sr_at_t_mean);
+        turnsEl.textContent = formatMetric(metrics.average_turns_mean);
+        asksEl.textContent = formatMetric(metrics.average_asks_mean);
+        recsEl.textContent = formatMetric(metrics.average_recommends_mean);
+        statusEl.textContent = `Benchmark saved: ${data.artifacts?.csv || 'CSV artifact unavailable'} Â· ${data.elapsed_seconds || 0}s`;
+        traceEl.textContent =
+          `With KG hybrid SR@T=${formatMetric(withKg?.metrics?.sr_at_t_mean)}±${formatMetric(withKg?.metrics?.sr_at_t_std)} | ` +
+          `No-KG random SR@T=${formatMetric(noKg?.metrics?.sr_at_t_mean)}±${formatMetric(noKg?.metrics?.sr_at_t_std)} | ` +
+          `FM-only SR@T=${formatMetric(fmOnly?.metrics?.sr_at_t_mean)}±${formatMetric(fmOnly?.metrics?.sr_at_t_std)}`;
+      } catch (e) {
+        console.error('Benchmark failed:', e);
+        statusEl.textContent = 'Benchmark failed. Check backend logs.';
+      } finally {
+        benchmarkBtn.disabled = false;
+        benchmarkBtn.textContent = 'Benchmark';
       }
     });
   }

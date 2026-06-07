@@ -1,0 +1,1130 @@
+{
+  "config": {
+    "max_users": 6,
+    "max_turns": 5,
+    "max_candidate_pool": 150,
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "include_no_kg": true,
+    "include_fm_only": true
+  },
+  "dataset": {
+    "source": "movielens",
+    "users_available": 111,
+    "kg_entities": 12797,
+    "kg_triples": 37508
+  },
+  "summary": [
+    {
+      "variant": "with_kg_hybrid",
+      "recommendation_mode": "hybrid_kg",
+      "description": "Current demo model: FM/BPR + KG propagation + KG embedding similarity.",
+      "seeds": [
+        42,
+        43,
+        44
+      ],
+      "metrics": {
+        "sr_at_t_mean": 0.4444,
+        "sr_at_t_std": 0.1572,
+        "average_turns_mean": 3.0,
+        "average_turns_std": 0.0,
+        "average_asks_mean": 3.0,
+        "average_asks_std": 0.0,
+        "average_recommends_mean": 1.0,
+        "average_recommends_std": 0.0,
+        "successes_mean": 2.6667,
+        "successes_std": 0.9428,
+        "evaluated_users_mean": 6.0,
+        "evaluated_users_std": 0.0
+      }
+    },
+    {
+      "variant": "no_kg_random",
+      "recommendation_mode": "random_no_kg",
+      "description": "No-KG final ranker baseline: random movies from the current candidate set.",
+      "seeds": [
+        42,
+        43,
+        44
+      ],
+      "metrics": {
+        "sr_at_t_mean": 0.3333,
+        "sr_at_t_std": 0.1361,
+        "average_turns_mean": 3.0,
+        "average_turns_std": 0.0,
+        "average_asks_mean": 3.0,
+        "average_asks_std": 0.0,
+        "average_recommends_mean": 1.0,
+        "average_recommends_std": 0.0,
+        "successes_mean": 2.0,
+        "successes_std": 0.8165,
+        "evaluated_users_mean": 6.0,
+        "evaluated_users_std": 0.0
+      }
+    },
+    {
+      "variant": "fm_only",
+      "recommendation_mode": "fm_only",
+      "description": "FM-only final ranker, without propagation and embedding similarity at recommendation time.",
+      "seeds": [
+        42,
+        43,
+        44
+      ],
+      "metrics": {
+        "sr_at_t_mean": 0.4444,
+        "sr_at_t_std": 0.1572,
+        "average_turns_mean": 3.0,
+        "average_turns_std": 0.0,
+        "average_asks_mean": 3.0,
+        "average_asks_std": 0.0,
+        "average_recommends_mean": 1.0,
+        "average_recommends_std": 0.0,
+        "successes_mean": 2.6667,
+        "successes_std": 0.9428,
+        "evaluated_users_mean": 6.0,
+        "evaluated_users_std": 0.0
+      }
+    }
+  ],
+  "runs": [
+    {
+      "variant": "with_kg_hybrid",
+      "recommendation_mode": "hybrid_kg",
+      "description": "Current demo model: FM/BPR + KG propagation + KG embedding similarity.",
+      "seed": 42,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 4,
+        "sr_at_t": 0.6667,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 20.416,
+      "sample": [
+        {
+          "user_id": "user:ml_18",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 20,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "hybrid_kg",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6254,
+                "q_recommend": 0.5394,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 111,
+                "selected_probability": 0.009,
+                "raw_gcn_index": 13,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4553,
+                "q_recommend": 0.6262,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 39,
+                "selected_probability": 0.0258,
+                "raw_gcn_index": 5,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.2765,
+                "q_recommend": 0.7721,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 3,
+                "selected_probability": 0.3492,
+                "raw_gcn_index": 0,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "Cashback",
+                "Trust",
+                "Wedding Banquet, The (Xi yan)",
+                "La La Land"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": -0.0401,
+                "q_recommend": 1.1447,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "with_kg_hybrid",
+      "recommendation_mode": "hybrid_kg",
+      "description": "Current demo model: FM/BPR + KG propagation + KG embedding similarity.",
+      "seed": 43,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 2,
+        "sr_at_t": 0.3333,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 16.701,
+      "sample": [
+        {
+          "user_id": "user:ml_127",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 11,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "hybrid_kg",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6408,
+                "q_recommend": 0.5318,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 50,
+                "selected_probability": 0.0197,
+                "raw_gcn_index": 14,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4799,
+                "q_recommend": 0.6196,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 35,
+                "selected_probability": 0.0282,
+                "raw_gcn_index": 15,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.3202,
+                "q_recommend": 0.7625,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 7,
+                "selected_probability": 0.1438,
+                "raw_gcn_index": 0,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "Teknolust",
+                "Spanglish",
+                "The Break-Up",
+                "Roll Bounce",
+                "All Yours"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": -0.0217,
+                "q_recommend": 1.1395,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "with_kg_hybrid",
+      "recommendation_mode": "hybrid_kg",
+      "description": "Current demo model: FM/BPR + KG propagation + KG embedding similarity.",
+      "seed": 44,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 2,
+        "sr_at_t": 0.3333,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 21.291,
+      "sample": [
+        {
+          "user_id": "user:ml_157",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 10,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "hybrid_kg",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6353,
+                "q_recommend": 0.5345,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 73,
+                "selected_probability": 0.0132,
+                "raw_gcn_index": 17,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4766,
+                "q_recommend": 0.6192,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 54,
+                "selected_probability": 0.0187,
+                "raw_gcn_index": 18,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": false,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.3387,
+                "q_recommend": 0.742,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 13,
+                "selected_probability": 0.0749,
+                "raw_gcn_index": 7,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "The Great Dictator",
+                "48 Hrs.",
+                "Empire Records",
+                "Bird People in China, The (Chûgoku no chôjin)",
+                "Memories of Me"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": 0.2946,
+                "q_recommend": 0.8624,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "no_kg_random",
+      "recommendation_mode": "random_no_kg",
+      "description": "No-KG final ranker baseline: random movies from the current candidate set.",
+      "seed": 42,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 3,
+        "sr_at_t": 0.5,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 0.125,
+      "sample": [
+        {
+          "user_id": "user:ml_18",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 20,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "random_no_kg",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6254,
+                "q_recommend": 0.5394,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 111,
+                "selected_probability": 0.009,
+                "raw_gcn_index": 13,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4553,
+                "q_recommend": 0.6262,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 39,
+                "selected_probability": 0.0258,
+                "raw_gcn_index": 5,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.2765,
+                "q_recommend": 0.7721,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 3,
+                "selected_probability": 0.3492,
+                "raw_gcn_index": 0,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "Trust",
+                "La La Land",
+                "Cashback",
+                "Wedding Banquet, The (Xi yan)"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": -0.0401,
+                "q_recommend": 1.1447,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "no_kg_random",
+      "recommendation_mode": "random_no_kg",
+      "description": "No-KG final ranker baseline: random movies from the current candidate set.",
+      "seed": 43,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 1,
+        "sr_at_t": 0.1667,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 0.114,
+      "sample": [
+        {
+          "user_id": "user:ml_127",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 11,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "random_no_kg",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6408,
+                "q_recommend": 0.5318,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 50,
+                "selected_probability": 0.0197,
+                "raw_gcn_index": 14,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4799,
+                "q_recommend": 0.6196,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 35,
+                "selected_probability": 0.0282,
+                "raw_gcn_index": 15,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.3202,
+                "q_recommend": 0.7625,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 7,
+                "selected_probability": 0.1438,
+                "raw_gcn_index": 0,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "Teknolust",
+                "Roll Bounce",
+                "All Yours",
+                "Spanglish",
+                "The Break-Up"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": -0.0217,
+                "q_recommend": 1.1395,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "no_kg_random",
+      "recommendation_mode": "random_no_kg",
+      "description": "No-KG final ranker baseline: random movies from the current candidate set.",
+      "seed": 44,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 2,
+        "sr_at_t": 0.3333,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 0.149,
+      "sample": [
+        {
+          "user_id": "user:ml_157",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 10,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "random_no_kg",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6353,
+                "q_recommend": 0.5345,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 73,
+                "selected_probability": 0.0132,
+                "raw_gcn_index": 17,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4766,
+                "q_recommend": 0.6192,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 54,
+                "selected_probability": 0.0187,
+                "raw_gcn_index": 18,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": false,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.3387,
+                "q_recommend": 0.742,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 13,
+                "selected_probability": 0.0749,
+                "raw_gcn_index": 7,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "48 Hrs.",
+                "Memories of Me",
+                "New York Stories",
+                "Bird People in China, The (Chûgoku no chôjin)",
+                "Veronica Mars"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": 0.2946,
+                "q_recommend": 0.8624,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "fm_only",
+      "recommendation_mode": "fm_only",
+      "description": "FM-only final ranker, without propagation and embedding similarity at recommendation time.",
+      "seed": 42,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 4,
+        "sr_at_t": 0.6667,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 0.131,
+      "sample": [
+        {
+          "user_id": "user:ml_18",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 20,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "fm_only",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6254,
+                "q_recommend": 0.5394,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 111,
+                "selected_probability": 0.009,
+                "raw_gcn_index": 13,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4553,
+                "q_recommend": 0.6262,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 39,
+                "selected_probability": 0.0258,
+                "raw_gcn_index": 5,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.2765,
+                "q_recommend": 0.7721,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 3,
+                "selected_probability": 0.3492,
+                "raw_gcn_index": 0,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "Wedding Banquet, The (Xi yan)",
+                "Trust",
+                "Cashback",
+                "La La Land"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": -0.0401,
+                "q_recommend": 1.1447,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "fm_only",
+      "recommendation_mode": "fm_only",
+      "description": "FM-only final ranker, without propagation and embedding similarity at recommendation time.",
+      "seed": 43,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 2,
+        "sr_at_t": 0.3333,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 0.131,
+      "sample": [
+        {
+          "user_id": "user:ml_127",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 11,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "fm_only",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6408,
+                "q_recommend": 0.5318,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 50,
+                "selected_probability": 0.0197,
+                "raw_gcn_index": 14,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4799,
+                "q_recommend": 0.6196,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 35,
+                "selected_probability": 0.0282,
+                "raw_gcn_index": 15,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.3202,
+                "q_recommend": 0.7625,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 7,
+                "selected_probability": 0.1438,
+                "raw_gcn_index": 0,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "Spanglish",
+                "Teknolust",
+                "The Break-Up",
+                "All Yours",
+                "Roll Bounce"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": -0.0217,
+                "q_recommend": 1.1395,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "fm_only",
+      "recommendation_mode": "fm_only",
+      "description": "FM-only final ranker, without propagation and embedding similarity at recommendation time.",
+      "seed": 44,
+      "metrics": {
+        "evaluated_users": 6,
+        "successes": 2,
+        "sr_at_t": 0.3333,
+        "average_turns": 3.0,
+        "average_asks": 3.0,
+        "average_recommends": 1.0
+      },
+      "elapsed_seconds": 0.164,
+      "sample": [
+        {
+          "user_id": "user:ml_157",
+          "success": false,
+          "turns": 3,
+          "ask_count": 3,
+          "recommend_count": 1,
+          "accepted_recommendation": null,
+          "positive_items": 10,
+          "candidate_pool_size": 150,
+          "recommendation_mode": "fm_only",
+          "trace": [
+            {
+              "action": "ask",
+              "attribute": "genre:Drama",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.6353,
+                "q_recommend": 0.5345,
+                "guard": "first_turn"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 73,
+                "selected_probability": 0.0132,
+                "raw_gcn_index": 17,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Comedy",
+              "accepted": true,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.4766,
+                "q_recommend": 0.6192,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 54,
+                "selected_probability": 0.0187,
+                "raw_gcn_index": 18,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "ask",
+              "attribute": "genre:Romance",
+              "accepted": false,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "ask",
+                "q_ask": 0.3387,
+                "q_recommend": 0.742,
+                "guard": "min_ask_turns"
+              },
+              "active_policy": {
+                "method": "rollout_gcn",
+                "pool_size": 13,
+                "selected_probability": 0.0749,
+                "raw_gcn_index": 7,
+                "feature_dim": 10,
+                "hidden_dim": 32,
+                "training_steps": 4100,
+                "rollout_graphs": 90
+              }
+            },
+            {
+              "action": "recommend",
+              "success": false,
+              "top_movies": [
+                "The Great Dictator",
+                "Empire Records",
+                "Memories of Me",
+                "48 Hrs.",
+                "New York Stories"
+              ],
+              "accepted_movie": null,
+              "policy": {
+                "method": "rollout_dqn",
+                "action": "recommend",
+                "q_ask": 0.2946,
+                "q_recommend": 0.8624,
+                "guard": null
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "note": "Report-oriented demo benchmark; not a full reproduction of the KGenSam paper protocol.",
+  "elapsed_seconds": 59.238
+}

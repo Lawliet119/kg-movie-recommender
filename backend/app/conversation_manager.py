@@ -36,6 +36,11 @@ class ConversationSession:
         'person': [],
         'year': [],
     })
+    soft_rejected_attributes: dict[str, list[str]] = field(default_factory=lambda: {
+        'genre': [],
+        'person': [],
+        'year': [],
+    })
 
     # Track what we've already asked
     asked_attributes: set[str] = field(default_factory=set)  # e.g. "genre:Sci-Fi", "person:Christopher Nolan"
@@ -43,6 +48,7 @@ class ConversationSession:
     # Conversation counters
     turn_count: int = 0
     max_turns: int = 5
+    min_ask_turns: int = 3
 
     # Candidate tracking
     candidate_movies: list[str] = field(default_factory=list)  # movie entity IDs
@@ -72,6 +78,12 @@ class ConversationSession:
             if attr_value not in self.rejected_attributes.get(attr_type, []):
                 self.rejected_attributes.setdefault(attr_type, []).append(attr_value)
 
+    def add_soft_rejection(self, attr_type: str, attr_value: str):
+        """Record weak negative evidence inferred from a rejected item."""
+        self.touch()
+        if attr_value not in self.soft_rejected_attributes.get(attr_type, []):
+            self.soft_rejected_attributes.setdefault(attr_type, []).append(attr_value)
+
     def get_all_accepted(self) -> list[tuple[str, str]]:
         """Get all accepted (type, value) pairs."""
         result = []
@@ -98,8 +110,10 @@ class ConversationSession:
             'session_id': self.session_id,
             'turn_count': self.turn_count,
             'max_turns': self.max_turns,
+            'min_ask_turns': self.min_ask_turns,
             'accepted': self.accepted_attributes,
             'rejected': self.rejected_attributes,
+            'soft_rejected': self.soft_rejected_attributes,
             'asked_count': len(self.asked_attributes),
             'candidate_count': len(self.candidate_movies),
             'should_recommend': self.should_recommend,

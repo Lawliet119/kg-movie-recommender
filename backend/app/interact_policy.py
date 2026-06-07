@@ -123,6 +123,7 @@ class InteractPolicyNetwork:
 
     def select_action(self, session, candidates: list[str], entropy: float) -> PolicyDecision:
         state = self.build_state(session, candidates, entropy)
+        min_ask_turns = max(0, min(getattr(session, "min_ask_turns", 1), session.max_turns))
 
         # Hard guards keep the conversational contract intact.
         if session.turn_count == 0:
@@ -134,6 +135,9 @@ class InteractPolicyNetwork:
         if len(candidates) <= 1:
             q_ask, q_rec = self._predict(state)
             return PolicyDecision("recommend", q_ask, q_rec, state, guard="candidate_floor")
+        if session.turn_count < min_ask_turns:
+            q_ask, q_rec = self._predict(state)
+            return PolicyDecision("ask", q_ask, q_rec, state, guard="min_ask_turns")
 
         q_ask, q_rec = self._predict(state)
         action = "recommend" if q_rec > q_ask else "ask"

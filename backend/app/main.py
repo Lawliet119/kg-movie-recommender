@@ -17,6 +17,7 @@ import os
 import logging
 import json
 import time
+import csv
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -62,6 +63,7 @@ PROJECT_DIR = os.path.dirname(BACKEND_DIR)
 EMBEDDINGS_DIR = os.path.join(BACKEND_DIR, 'trained_models', 'kg_embeddings')
 MOVIELENS_DIR = os.path.join(PROJECT_DIR, 'data', 'movielens')
 TMDB_CACHE_DIR = os.path.join(PROJECT_DIR, 'data', 'tmdb_cache')
+EVALUATION_OUTPUT_DIR = os.path.join(PROJECT_DIR, 'outputs', 'evaluation')
 
 
 @asynccontextmanager
@@ -242,6 +244,7 @@ class TrainRequest(BaseModel):
 
 class ConversationStartRequest(BaseModel):
     max_turns: int = 5
+    min_ask_turns: int = 3
 
 
 class ConversationAnswerRequest(BaseModel):
@@ -263,6 +266,7 @@ class EvaluationRequest(BaseModel):
     max_turns: int = 5
     max_candidate_pool: int = 200
     seed: int = 42
+    recommendation_mode: str = "hybrid_kg"
 
 
 class NegativeSamplerAblationRequest(BaseModel):
@@ -271,6 +275,17 @@ class NegativeSamplerAblationRequest(BaseModel):
     max_candidate_pool: int = 200
     seed: int = 42
     random_fm_epochs: int = 1
+    baseline_fm_epochs: int = 1
+
+
+class BenchmarkEvaluationRequest(BaseModel):
+    max_users: int = 10
+    max_turns: int = 5
+    max_candidate_pool: int = 150
+    seeds: list[int] = [42, 43, 44]
+    include_no_kg: bool = True
+    include_fm_only: bool = True
+    save_artifacts: bool = True
 
 
 # --- API Endpoints ---
@@ -457,6 +472,94 @@ async def health():
     }
 
 
+@app.get("/api/report/summary")
+async def report_summary():
+    """Return report-ready implementation summary for slides/report appendix."""
+    return {
+        "project_claim": (
+            "KGenSam-inspired conversational movie recommender using MovieLens "
+            "user-item interactions and TMDB external KG enrichment."
+        ),
+        "dataset": {
+            "user_item_interaction": "MovieLens ratings.csv",
+            "item_metadata": "MovieLens movies.csv",
+            "external_kg_alignment": "MovieLens links.csv -> tmdbId",
+            "external_kg": "TMDB API",
+            "standard_dataset_only": kg_source_metadata.get("standard_dataset_only", False),
+            "kg_source_metadata": kg_source_metadata,
+        },
+        "kg_stats": kg.stats,
+        "components": {
+            "interact_policy": engine.interact_policy.metadata if engine and engine.interact_policy else {},
+            "active_policy": active_sampler.active_policy.metadata if active_sampler else {},
+            "negative_sampler": negative_sampler.metadata if negative_sampler else {},
+            "recommender": {
+                "method": "FM/BPR + KG propagation + KG embedding similarity",
+                "fm_trained": fm_model.is_trained if fm_model else False,
+            },
+            "policy_training": policy_training_metadata,
+            "interaction_data": {
+                "source": interaction_data.source if interaction_data else None,
+                "users": len(interaction_data.users) if interaction_data else 0,
+                "oi_pairs": len(interaction_data.oi_pairs) if interaction_data else 0,
+                "oa_pairs": len(interaction_data.oa_pairs) if interaction_data else 0,
+            },
+        },
+        "paper_mapping": [
+            {
+                "paper_component": "Heterogeneous KG",
+                "project_component": "MovieLens item/user data aligned with TMDB external KG",
+                "status": "implemented_demo_scale",
+            },
+            {
+                "paper_component": "Interact Policy Network",
+                "project_component": "rollout_dqn ask/recommend policy",
+                "status": "implemented_demo_rl",
+            },
+            {
+                "paper_component": "Active Sampler",
+                "project_component": "rollout_gcn attribute-question scorer",
+                "status": "implemented_demo_rl",
+            },
+            {
+                "paper_component": "Negative Sampler",
+                "project_component": "learned_linear_policy negative sampler",
+                "status": "implemented_demo_policy",
+            },
+            {
+                "paper_component": "Recommender",
+                "project_component": "FM/BPR with KG propagation and embeddings",
+                "status": "implemented_demo_hybrid",
+            },
+        ],
+        "recommended_evaluation_config": {
+            "max_users": 5,
+            "max_turns": 5,
+            "max_candidate_pool": 150,
+            "seed": 42,
+        },
+        "latest_reference_metrics": {
+            "sr_at_t": 0.60,
+            "average_turns": 1.00,
+            "average_asks": 1.00,
+            "average_recommends": 1.00,
+            "note": "Reference result from demo-scale offline simulator after rollout policy training.",
+        },
+        "limitations": [
+            "Demo-scale implementation, not full reproduction of paper experiments.",
+            "Policy training uses MovieLens-derived offline simulator rollouts, not full online RL.",
+            "TMDB enrichment is capped by TMDB_MAX_MOVIES for startup/runtime practicality.",
+            "Evaluation uses a bounded candidate pool and small user sample for live demo speed.",
+            "Ablation is demo-scale and should not be treated as statistically conclusive.",
+        ],
+        "slide_takeaway": (
+            "The system implements the main KGenSam CRS loop with MovieLens/TMDB KG, "
+            "rollout-trained ask/recommend and active-question policies, learned negative "
+            "sampling, binary feedback, live session tracking, and offline evaluation."
+        ),
+    }
+
+
 @app.post("/api/evaluate")
 async def evaluate(req: EvaluationRequest):
     """Run offline CRS evaluation with the MovieLens/user-profile simulator."""
@@ -466,6 +569,7 @@ async def evaluate(req: EvaluationRequest):
         max_turns=req.max_turns,
         max_candidate_pool=req.max_candidate_pool,
         seed=req.seed,
+        recommendation_mode=req.recommendation_mode,
     ))
 
 
@@ -482,10 +586,20 @@ async def evaluate_negative_sampler_ablation(req: NegativeSamplerAblationRequest
         max_turns=req.max_turns,
         max_candidate_pool=req.max_candidate_pool,
         seed=req.seed,
+        recommendation_mode="hybrid_kg",
     )
     original_fm = engine.fm_model
 
-    hard_result = EvaluationRunner(engine, interaction_data).run(config)
+    learned_result = EvaluationRunner(engine, interaction_data).run(config)
+
+    hard_fm = FMModel(k=16, lr=0.01, reg=0.01)
+    hard_fm.build_feature_index(kg, interaction_data=interaction_data)
+    hard_fm.train(
+        kg,
+        epochs=req.baseline_fm_epochs,
+        interaction_data=interaction_data,
+        negative_sampler=NegativeSampler(kg, interaction_data, kg_embeddings=embedding_model, seed=req.seed),
+    )
 
     random_fm = FMModel(k=16, lr=0.01, reg=0.01)
     random_fm.build_feature_index(kg, interaction_data=interaction_data)
@@ -497,6 +611,9 @@ async def evaluate_negative_sampler_ablation(req: NegativeSamplerAblationRequest
     )
 
     try:
+        engine.fm_model = hard_fm
+        hard_result = EvaluationRunner(engine, interaction_data).run(config)
+
         engine.fm_model = random_fm
         random_result = EvaluationRunner(engine, interaction_data).run(config)
     finally:
@@ -509,11 +626,18 @@ async def evaluate_negative_sampler_ablation(req: NegativeSamplerAblationRequest
             "max_candidate_pool": req.max_candidate_pool,
             "seed": req.seed,
             "random_fm_epochs": req.random_fm_epochs,
+            "baseline_fm_epochs": req.baseline_fm_epochs,
         },
         "results": [
             {
                 "sampler": "learned_negative_current",
                 "description": "Current learned KGenSam-style negative sampler used by the running FM model.",
+                "metrics": learned_result["metrics"],
+                "elapsed_seconds": learned_result["elapsed_seconds"],
+            },
+            {
+                "sampler": "hard_negative_baseline",
+                "description": "Hard negative sampler baseline based on KG-local similarity.",
                 "metrics": hard_result["metrics"],
                 "elapsed_seconds": hard_result["elapsed_seconds"],
             },
@@ -529,6 +653,174 @@ async def evaluate_negative_sampler_ablation(req: NegativeSamplerAblationRequest
     }
 
 
+@app.post("/api/evaluate/benchmark")
+async def evaluate_benchmark(req: BenchmarkEvaluationRequest):
+    """
+    Run report-oriented multi-seed evaluation.
+
+    Variants:
+    - with_kg_hybrid: current FM + KG propagation + KG embeddings.
+    - no_kg_random: same conversation state, random final ranker baseline.
+    - fm_only: FM final ranker without propagation/embedding scoring.
+    """
+    started = time.time()
+    seeds = req.seeds or [42]
+    seeds = seeds[:8]
+    variants = [
+        {
+            "name": "with_kg_hybrid",
+            "recommendation_mode": "hybrid_kg",
+            "description": "Current demo model: FM/BPR + KG propagation + KG embedding similarity.",
+        },
+    ]
+    if req.include_no_kg:
+        variants.append({
+            "name": "no_kg_random",
+            "recommendation_mode": "random_no_kg",
+            "description": "No-KG final ranker baseline: random movies from the current candidate set.",
+        })
+    if req.include_fm_only:
+        variants.append({
+            "name": "fm_only",
+            "recommendation_mode": "fm_only",
+            "description": "FM-only final ranker, without propagation and embedding similarity at recommendation time.",
+        })
+
+    runs = []
+    runner = EvaluationRunner(engine, interaction_data)
+    for variant in variants:
+        for seed in seeds:
+            result = runner.run(EvaluationConfig(
+                max_users=req.max_users,
+                max_turns=req.max_turns,
+                max_candidate_pool=req.max_candidate_pool,
+                seed=seed,
+                recommendation_mode=variant["recommendation_mode"],
+            ))
+            runs.append({
+                "variant": variant["name"],
+                "recommendation_mode": variant["recommendation_mode"],
+                "description": variant["description"],
+                "seed": seed,
+                "metrics": result["metrics"],
+                "elapsed_seconds": result["elapsed_seconds"],
+                "sample": result.get("samples", [])[:1],
+            })
+
+    summary = _aggregate_benchmark_runs(runs)
+    response = {
+        "config": {
+            "max_users": req.max_users,
+            "max_turns": req.max_turns,
+            "max_candidate_pool": req.max_candidate_pool,
+            "seeds": seeds,
+            "include_no_kg": req.include_no_kg,
+            "include_fm_only": req.include_fm_only,
+        },
+        "dataset": {
+            "source": interaction_data.source if interaction_data else None,
+            "users_available": len(interaction_data.users) if interaction_data else 0,
+            "kg_entities": kg.stats.get("totalEntities"),
+            "kg_triples": kg.stats.get("totalTriples"),
+        },
+        "summary": summary,
+        "runs": runs,
+        "note": "Report-oriented demo benchmark; not a full reproduction of the KGenSam paper protocol.",
+        "elapsed_seconds": round(time.time() - started, 3),
+    }
+    if req.save_artifacts:
+        response["artifacts"] = _save_benchmark_artifacts(response)
+    return response
+
+
+def _aggregate_benchmark_runs(runs: list[dict]) -> list[dict]:
+    metric_names = [
+        "sr_at_t",
+        "average_turns",
+        "average_asks",
+        "average_recommends",
+        "successes",
+        "evaluated_users",
+    ]
+    by_variant: dict[str, list[dict]] = {}
+    for run in runs:
+        by_variant.setdefault(run["variant"], []).append(run)
+
+    summary = []
+    for variant, variant_runs in by_variant.items():
+        metrics = {}
+        for metric_name in metric_names:
+            values = [
+                float(run["metrics"].get(metric_name, 0.0))
+                for run in variant_runs
+            ]
+            metrics[f"{metric_name}_mean"] = round(_mean(values), 4)
+            metrics[f"{metric_name}_std"] = round(_std(values), 4)
+        summary.append({
+            "variant": variant,
+            "recommendation_mode": variant_runs[0]["recommendation_mode"],
+            "description": variant_runs[0]["description"],
+            "seeds": [run["seed"] for run in variant_runs],
+            "metrics": metrics,
+        })
+    return summary
+
+
+def _save_benchmark_artifacts(response: dict) -> dict:
+    os.makedirs(EVALUATION_OUTPUT_DIR, exist_ok=True)
+    json_path = os.path.join(EVALUATION_OUTPUT_DIR, "latest_benchmark.json")
+    csv_path = os.path.join(EVALUATION_OUTPUT_DIR, "latest_benchmark.csv")
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(response, f, ensure_ascii=False, indent=2)
+
+    rows = []
+    for run in response.get("runs", []):
+        row = {
+            "variant": run["variant"],
+            "recommendation_mode": run["recommendation_mode"],
+            "seed": run["seed"],
+            "elapsed_seconds": run["elapsed_seconds"],
+        }
+        row.update(run.get("metrics", {}))
+        rows.append(row)
+
+    fieldnames = [
+        "variant",
+        "recommendation_mode",
+        "seed",
+        "evaluated_users",
+        "successes",
+        "sr_at_t",
+        "average_turns",
+        "average_asks",
+        "average_recommends",
+        "elapsed_seconds",
+    ]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+    return {
+        "json": json_path,
+        "csv": csv_path,
+    }
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _std(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    avg = _mean(values)
+    variance = sum((value - avg) ** 2 for value in values) / len(values)
+    return variance ** 0.5
+
+
 # --- KGenSam Conversational Endpoints ---
 
 @app.post("/api/conversation/start")
@@ -541,6 +833,7 @@ async def conversation_start(req: ConversationStartRequest):
     """
     session = session_store.create()
     session.max_turns = req.max_turns
+    session.min_ask_turns = max(0, min(req.min_ask_turns, req.max_turns))
 
     # Execute first conversation step
     result = engine.conversational_step(session)
@@ -593,13 +886,40 @@ async def conversation_movie_feedback(req: MovieFeedbackRequest):
         }
 
     session.recommended_movies.add(req.movie_id)
+    soft_rejected = _record_soft_rejected_item_attributes(session, req.movie_id)
     result = engine.conversational_step(session)
     result["feedback"] = {
         "type": "item",
         "accepted": False,
         "movie": movie,
+        "soft_rejected_attributes": soft_rejected,
     }
     return result
+
+
+def _record_soft_rejected_item_attributes(session, movie_id: str) -> dict[str, list[str]]:
+    """Use rejected item metadata as weak negative ranking evidence."""
+    extracted: dict[str, list[str]] = {
+        "genre": [],
+        "person": [],
+        "year": [],
+    }
+    relation_map = [
+        ("has_genre", "genre", 4),
+        ("directed_by", "person", 2),
+        ("starred_actors", "person", 3),
+        ("release_year", "year", 1),
+    ]
+
+    for relation, attr_type, limit in relation_map:
+        for entity in kg.get_related(movie_id, relation)[:limit]:
+            value = entity.get("name")
+            if not value:
+                continue
+            session.add_soft_rejection(attr_type, value)
+            extracted.setdefault(attr_type, []).append(value)
+
+    return extracted
 
 
 @app.get("/api/conversation/{session_id}")

@@ -289,7 +289,7 @@ class RecommenderEngine:
             try:
                 decision = self.interact_policy.select_action(session, candidates, entropy)
                 session.last_policy = {
-                    'method': 'bootstrap_dqn',
+                    'method': self.interact_policy.metadata.get('method', 'dqn_policy'),
                     'action': decision.action,
                     'q_ask': round(decision.q_ask, 4),
                     'q_recommend': round(decision.q_recommend, 4),
@@ -320,6 +320,7 @@ class RecommenderEngine:
         """
         ENTROPY_THRESHOLD = 1.5  # Below this → confident enough to recommend
         MIN_CANDIDATES_TO_ASK = 6  # If fewer candidates, just recommend
+        min_ask_turns = max(0, min(getattr(session, 'min_ask_turns', 1), session.max_turns))
 
         # Rule 1: Always ask at least once
         if session.turn_count == 0:
@@ -334,6 +335,12 @@ class RecommenderEngine:
         if len(candidates) <= MIN_CANDIDATES_TO_ASK:
             logger.info(f"📊 Policy: RECOMMEND (only {len(candidates)} candidates)")
             return 'recommend'
+
+        if session.turn_count < min_ask_turns:
+            logger.info(
+                f"Policy: ASK (minimum ask turns {session.turn_count}/{min_ask_turns})"
+            )
+            return 'ask'
 
         # Rule 4: Entropy check
         if entropy < ENTROPY_THRESHOLD:
@@ -388,9 +395,10 @@ class RecommenderEngine:
             fm_scores = {mid: s for mid, s in fm_ranked}
 
         # --- 2. Graph propagation scores ---
+        combined_rejected = self._combined_rejected_preferences(session)
         entity_pref_scores = self.propagator.propagate(
             session.accepted_attributes,
-            session.rejected_attributes,
+            combined_rejected,
             max_hops=2,
         )
         prop_scores = self.propagator.score_candidate_movies(
@@ -461,6 +469,10 @@ class RecommenderEngine:
                 'method': scoring_method,
                 'scoring_weights': {'fm': ALPHA_FM, 'propagation': BETA_PROP, 'embedding': GAMMA_EMB},
                 'preferences_used': session.accepted_attributes,
+                'negative_feedback_used': {
+                    'explicit_rejected': session.rejected_attributes,
+                    'soft_rejected_from_items': session.soft_rejected_attributes,
+                },
                 'turns_taken': session.turn_count,
                 'ranked_candidate_count': len(candidates),
                 'total_candidate_count': total_candidates,
@@ -484,6 +496,11 @@ class RecommenderEngine:
             for attr_type, values in session.rejected_attributes.items()
             for value in values
         }
+        soft_rejected = {
+            f"{attr_type}:{value}".lower()
+            for attr_type, values in session.soft_rejected_attributes.items()
+            for value in values
+        }
 
         def movie_attrs(movie_id: str) -> set[str]:
             attrs = set()
@@ -505,10 +522,25 @@ class RecommenderEngine:
                 score += 3 * len(attrs & accepted)
             if rejected:
                 score -= 2 * len(attrs & rejected)
+            if soft_rejected:
+                score -= len(attrs & soft_rejected)
             scored.append((score, movie_id))
 
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [movie_id for _, movie_id in scored[:limit]]
+
+    @staticmethod
+    def _combined_rejected_preferences(session: ConversationSession) -> dict[str, list[str]]:
+        combined = {
+            attr_type: list(values)
+            for attr_type, values in session.rejected_attributes.items()
+        }
+        for attr_type, values in session.soft_rejected_attributes.items():
+            bucket = combined.setdefault(attr_type, [])
+            for value in values:
+                if value not in bucket:
+                    bucket.append(value)
+        return combined
 
     @staticmethod
     def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:

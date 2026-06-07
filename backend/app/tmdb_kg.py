@@ -47,19 +47,12 @@ def load_tmdb_movie_triples(
             "movies_path": movies_path,
         }
 
-    if not api_key:
-        return [], {
-            "source": "tmdb",
-            "enabled": False,
-            "reason": "TMDB_API_KEY is not set",
-            "links_path": links_path,
-        }
-
     movie_id_to_title = _load_movielens_titles(movies_path)
     movie_id_to_tmdb_id = _load_tmdb_ids(links_path)
 
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
+    cache_only = not bool(api_key)
 
     triples: list[str] = []
     requested = 0
@@ -127,6 +120,8 @@ def load_tmdb_movie_triples(
     return triples, {
         "source": "tmdb",
         "enabled": True,
+        "cache_only": cache_only,
+        "reason": "TMDB_API_KEY is not set; using cached TMDB payloads only" if cache_only else None,
         "requested_movies": requested,
         "cached_movies": cached,
         "fetched_movies": fetched,
@@ -167,7 +162,7 @@ def _load_tmdb_ids(links_path: str) -> dict[str, str]:
 def _get_tmdb_payload(
     client: httpx.Client,
     tmdb_id: str,
-    api_key: str,
+    api_key: str | None,
     cache_path: Path,
 ) -> tuple[dict | None, bool]:
     file_path = cache_path / f"{tmdb_id}.json"
@@ -176,6 +171,9 @@ def _get_tmdb_payload(
             return json.loads(file_path.read_text(encoding="utf-8")), True
         except json.JSONDecodeError:
             file_path.unlink(missing_ok=True)
+
+    if not api_key:
+        return None, False
 
     try:
         response = client.get(
