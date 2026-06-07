@@ -220,6 +220,7 @@ class KGEmbeddingModel:
         path: str,
         expected_entities: Optional[Iterable[str]] = None,
         min_coverage: float = 0.98,
+        strict_entity_count: bool = False,
     ) -> bool:
         """Load pre-trained embeddings from disk."""
         emb_path = os.path.join(path, 'embeddings.npy')
@@ -230,7 +231,19 @@ class KGEmbeddingModel:
         with open(ent_path, 'r') as f:
             self.entity_to_id = json.load(f)
         if expected_entities is not None:
-            coverage = self.coverage(expected_entities)
+            expected = set(expected_entities)
+            if strict_entity_count and len(self.entity_to_id) != len(expected):
+                logger.warning(
+                    "Cached KG embeddings entity count does not match current KG: "
+                    f"{len(self.entity_to_id)} != {len(expected)}. Retraining required."
+                )
+                self.entity_embeddings = None
+                self.entity_to_id = {}
+                self.id_to_entity = {}
+                self.relation_to_id = {}
+                self._trained = False
+                return False
+            coverage = self.coverage(expected)
             if coverage < min_coverage:
                 logger.warning(
                     "Cached KG embeddings coverage is too low: "

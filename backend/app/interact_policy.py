@@ -80,6 +80,8 @@ class InteractPolicyNetwork:
         self.loss_fn = nn.MSELoss()
         self._trained = False
         self.training_steps = 0
+        self.training_source = "untrained"
+        self.rollout_samples = 0
 
     @property
     def is_trained(self) -> bool:
@@ -88,10 +90,11 @@ class InteractPolicyNetwork:
     @property
     def metadata(self) -> dict:
         return {
-            "method": "bootstrap_dqn",
+            "method": self.training_source if self._trained else "untrained_dqn",
             "state_dim": self.state_dim,
             "hidden_dim": self.hidden_dim,
             "training_steps": self.training_steps,
+            "rollout_samples": self.rollout_samples,
             "max_movie_count": self.max_movie_count,
         }
 
@@ -179,6 +182,37 @@ class InteractPolicyNetwork:
             self.training_steps += 1
 
         self._trained = True
+        self.training_source = "bootstrap_dqn"
+
+    def train_from_targets(
+        self,
+        states: list[list[float]],
+        targets: list[list[float]],
+        epochs: int = 25,
+        lr: float | None = None,
+    ):
+        """Train DQN Q-values from simulator rollout targets."""
+        if not states or not targets:
+            return
+
+        if lr is not None:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+
+        x = torch.tensor(states, dtype=torch.float32, device=self.device)
+        y = torch.tensor(targets, dtype=torch.float32, device=self.device)
+
+        self.model.train()
+        for _ in range(epochs):
+            prediction = self.model(x)
+            loss = self.loss_fn(prediction, y)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            self.training_steps += 1
+
+        self.rollout_samples += len(states)
+        self._trained = True
+        self.training_source = "rollout_dqn"
 
     def _predict(self, state: list[float]) -> tuple[float, float]:
         self.model.eval()

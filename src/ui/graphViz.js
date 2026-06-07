@@ -4,6 +4,7 @@
 import { Network, DataSet } from 'vis-network/standalone';
 
 const NODE_COLORS = {
+  user: { background: '#0f172a', border: '#e2e8f0', highlight: { background: '#1e293b', border: '#ffffff' }, font: { color: '#fff' } },
   movie: { background: '#7c3aed', border: '#a855f7', highlight: { background: '#a855f7', border: '#c084fc' }, font: { color: '#fff' } },
   person: { background: '#059669', border: '#10b981', highlight: { background: '#10b981', border: '#34d399' }, font: { color: '#fff' } },
   genre: { background: '#d97706', border: '#f59e0b', highlight: { background: '#f59e0b', border: '#fbbf24' }, font: { color: '#fff' } },
@@ -12,8 +13,8 @@ const NODE_COLORS = {
   recommended: { background: '#0891b2', border: '#06b6d4', highlight: { background: '#06b6d4', border: '#22d3ee' }, font: { color: '#fff' } },
 };
 
-const NODE_SHAPES = { movie: 'dot', person: 'diamond', genre: 'triangle', year: 'square' };
-const RELATION_LABELS = { directed_by: 'directed by', starred_actors: 'starred', has_genre: 'genre', release_year: 'year' };
+const NODE_SHAPES = { user: 'star', movie: 'dot', person: 'diamond', genre: 'triangle', year: 'square' };
+const RELATION_LABELS = { directed_by: 'directed by', starred_actors: 'starred', has_genre: 'genre', release_year: 'year', preference: 'likes', ask: 'ask', recommend: 'recommend' };
 
 export class GraphVisualization {
   constructor(containerId) {
@@ -70,10 +71,11 @@ export class GraphVisualization {
 
   addNode(id, label, type, extra = {}) {
     if (this.nodes.get(id)) return;
+    const nodeLabel = String(label ?? '');
     const colors = NODE_COLORS[type] || NODE_COLORS.movie;
     this.nodes.add({
-      id, label: label.length > 20 ? label.substring(0, 18) + '…' : label,
-      title: label,
+      id, label: nodeLabel.length > 20 ? nodeLabel.substring(0, 18) + '…' : nodeLabel,
+      title: nodeLabel,
       shape: NODE_SHAPES[type] || 'dot',
       color: colors,
       size: type === 'movie' ? 22 : 14,
@@ -131,6 +133,97 @@ export class GraphVisualization {
         }, 500);
       }
     }, 100);
+  }
+
+  /** Show KGenSam conversational recommendation state. */
+  showConversationalRecommendations(recommendations, session) {
+    this.clear();
+    if (this.infoOverlay) this.infoOverlay.classList.add('hidden');
+
+    const userId = 'conversation:user';
+    this.addNode(userId, 'User', 'user', {
+      size: 30,
+      font: { size: 14, color: '#fff', bold: true },
+    });
+
+    const prefs = recommendations.preferences_used || session?.accepted || {};
+    const prefNodeIds = [];
+    for (const [type, values] of Object.entries(prefs)) {
+      for (const value of values || []) {
+        const prefId = `conversation:pref:${type}:${value}`;
+        prefNodeIds.push({ id: prefId, type, value });
+        this.addNode(prefId, value, type);
+        this.addEdge(userId, prefId, 'preference');
+      }
+    }
+
+    for (const rec of recommendations.results || []) {
+      const movie = rec.movie;
+      if (!movie) continue;
+      this.addNode(movie.id, movie.name, 'movie', {
+        color: NODE_COLORS.recommended,
+        size: 24,
+        font: { size: 12, color: '#fff' },
+      });
+
+      const matchedPrefs = prefNodeIds.filter(pref =>
+        (rec.reasons || []).some(reason =>
+          String(reason.type || '').toLowerCase() === pref.type.toLowerCase()
+          || String(reason.text || '').toLowerCase().includes(String(pref.value).toLowerCase())
+        )
+      );
+
+      const links = matchedPrefs.length ? matchedPrefs : prefNodeIds.slice(0, 2);
+      if (links.length) {
+        for (const pref of links) this.addEdge(pref.id, movie.id, 'recommend');
+      } else {
+        this.addEdge(userId, movie.id, 'recommend');
+      }
+    }
+
+    setTimeout(() => {
+      if (this.network) {
+        this.network.stabilize(80);
+        setTimeout(() => {
+          this.network.fit({ animation: { duration: 600, easingFunction: 'easeInOutQuad' } });
+        }, 350);
+      }
+    }, 100);
+  }
+
+  /** Show the current ask turn in the KGenSam loop. */
+  showConversationQuestion(question, session) {
+    this.clear();
+    if (this.infoOverlay) this.infoOverlay.classList.add('hidden');
+
+    const userId = 'conversation:user';
+    this.addNode(userId, 'User', 'user', {
+      size: 30,
+      font: { size: 14, color: '#fff', bold: true },
+    });
+
+    const accepted = session?.accepted || {};
+    for (const [type, values] of Object.entries(accepted)) {
+      for (const value of values || []) {
+        const prefId = `conversation:pref:${type}:${value}`;
+        this.addNode(prefId, value, type);
+        this.addEdge(userId, prefId, 'preference');
+      }
+    }
+
+    if (question) {
+      const attrId = `conversation:ask:${question.attr_type}:${question.attr_value}`;
+      this.addNode(attrId, question.attr_value, question.attr_type, {
+        color: NODE_COLORS.source,
+        size: 26,
+        font: { size: 13, color: '#fff', bold: true },
+      });
+      this.addEdge(userId, attrId, 'ask');
+    }
+
+    setTimeout(() => {
+      if (this.network) this.network.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+    }, 200);
   }
 
   /** Show entity and its immediate neighbors */

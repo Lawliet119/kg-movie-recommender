@@ -106,6 +106,67 @@
           <span class="legend-item"><span class="dot dot-genre"></span> Genre</span>
           <span class="legend-item"><span class="dot dot-year"></span> Year</span>
         </div>
+        <div id="live-session-panel" class="evaluation-panel live-session-panel">
+          <div class="evaluation-header">
+            <div>
+              <h3>Live Session</h3>
+              <span>Your real chat choices in this browser</span>
+            </div>
+            <button id="btn-clear-live-session" class="eval-btn secondary">Clear</button>
+          </div>
+          <div class="evaluation-grid">
+            <div class="eval-metric">
+              <strong id="live-turn">0</strong>
+              <span>Turn</span>
+            </div>
+            <div class="eval-metric">
+              <strong id="live-accepted">0</strong>
+              <span>Accepted</span>
+            </div>
+            <div class="eval-metric">
+              <strong id="live-rejected">0</strong>
+              <span>Rejected</span>
+            </div>
+            <div class="eval-metric">
+              <strong id="live-items">0</strong>
+              <span>Item fb</span>
+            </div>
+          </div>
+          <div id="live-session-status" class="evaluation-status">Start KGenSam flow to track live feedback</div>
+          <div id="live-session-trace" class="evaluation-trace"></div>
+        </div>
+        <div id="evaluation-panel" class="evaluation-panel">
+          <div class="evaluation-header">
+            <div>
+              <h3>Offline Evaluation</h3>
+              <span>Simulator metrics, separate from the live chat</span>
+            </div>
+            <div class="evaluation-actions">
+              <button id="btn-run-evaluation" class="eval-btn">Run</button>
+              <button id="btn-run-ablation" class="eval-btn secondary">Ablation</button>
+            </div>
+          </div>
+          <div class="evaluation-grid">
+            <div class="eval-metric">
+              <strong id="eval-sr">--</strong>
+              <span>SR@T</span>
+            </div>
+            <div class="eval-metric">
+              <strong id="eval-turns">--</strong>
+              <span>Avg turns</span>
+            </div>
+            <div class="eval-metric">
+              <strong id="eval-asks">--</strong>
+              <span>Avg asks</span>
+            </div>
+            <div class="eval-metric">
+              <strong id="eval-recs">--</strong>
+              <span>Avg recs</span>
+            </div>
+          </div>
+          <div id="evaluation-status" class="evaluation-status">Ready: simulated 5 users, T=5, pool=150</div>
+          <div id="evaluation-trace" class="evaluation-trace"></div>
+        </div>
         <div id="graph-info" class="graph-info-overlay">
           <p>💡 Ask for a recommendation to visualize the Knowledge Graph reasoning path</p>
         </div>

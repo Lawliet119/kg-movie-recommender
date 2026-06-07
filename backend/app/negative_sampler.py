@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import random
 
+import re
+import numpy as np
+
 from .interaction_data import InteractionData, movie_attribute_keys
 
 
@@ -36,9 +39,10 @@ class NegativeSampler:
     item's attributes. Candidate negatives are gathered from the local KG first.
     """
 
-    def __init__(self, kg, interaction_data: InteractionData | None = None, seed: int = 42):
+    def __init__(self, kg, interaction_data: InteractionData | None = None, kg_embeddings = None, seed: int = 42):
         self.kg = kg
         self.interaction_data = interaction_data
+        self.kg_embeddings = kg_embeddings
         self.rng = random.Random(seed)
         self._movie_attrs = {
             movie_id: movie_attribute_keys(kg, movie_id)
@@ -46,6 +50,14 @@ class NegativeSampler:
         }
         self._undirected = kg.graph.to_undirected()
         self._candidate_cache: dict[str, set[str]] = {}
+
+    def _resolve_entity_id(self, attr_key: str) -> str:
+        """Resolve attribute key like 'genre:Drama' to normalized entity ID 'genre:drama'."""
+        if ":" in attr_key:
+            atype, name = attr_key.split(":", 1)
+            slug = re.sub(r'[^a-z0-9]+', '_', name.lower())
+            return f"{atype}:{slug}"
+        return attr_key
 
     def sample(
         self,
@@ -139,10 +151,37 @@ class NegativeSampler:
         positive_attrs: set[str],
     ) -> NegativeSample:
         candidate_attrs = self._movie_attrs.get(candidate, set())
-        user_similarity = self._jaccard(candidate_attrs, user_attrs)
-        positive_similarity = self._jaccard(candidate_attrs, positive_attrs)
-        graph_distance = None
-        reward = user_similarity + positive_similarity
+        
+        if self.kg_embeddings and self.kg_embeddings.is_trained:
+            # KG embedding-based similarity (Zhao et al., 2021)
+            positive_similarity = self.kg_embeddings.compute_similarity(candidate, positive_item)
+            
+            # User representation is the average of accepted attribute embeddings
+            user_similarity = 0.0
+            user_embs = []
+            for attr in user_attrs:
+                resolved_id = self._resolve_entity_id(attr)
+                emb = self.kg_embeddings.get_embedding(resolved_id)
+                if emb is not None:
+                    user_embs.append(emb)
+            
+            cand_emb = self.kg_embeddings.get_embedding(candidate)
+            if user_embs and cand_emb is not None:
+                user_vector = np.mean(user_embs, axis=0)
+                norm_user = np.linalg.norm(user_vector)
+                norm_cand = np.linalg.norm(cand_emb)
+                if norm_user > 0 and norm_cand > 0:
+                    user_similarity = float(np.dot(cand_emb, user_vector) / (norm_user * norm_cand))
+            
+            reward = user_similarity + positive_similarity
+            graph_distance = None
+        else:
+            # Fallback to Jaccard similarity
+            user_similarity = self._jaccard(candidate_attrs, user_attrs)
+            positive_similarity = self._jaccard(candidate_attrs, positive_attrs)
+            graph_distance = None
+            reward = user_similarity + positive_similarity
+
         return NegativeSample(
             user_id=user_id,
             positive_item=positive_item,
@@ -171,3 +210,210 @@ class NegativeSampler:
         if not union:
             return 0.0
         return len(left & right) / len(union)
+
+
+class LearnedNegativeSampler(NegativeSampler):
+    """
+    Lightweight learned sampler policy for KGenSam-style negative sampling.
+
+    This is not the full RL sampler from the paper, but it turns the previous
+    hand-scored hard negative miner into a trained policy scorer. The policy is
+    bootstrapped from MovieLens feedback and KG similarity features, then used
+    to rank candidate negatives during FM/BPR training.
+    """
+
+    def __init__(
+        self,
+        kg,
+        interaction_data: InteractionData | None = None,
+        kg_embeddings=None,
+        seed: int = 42,
+    ):
+        super().__init__(kg, interaction_data, kg_embeddings=kg_embeddings, seed=seed)
+        self.weights: np.ndarray | None = None
+        self.metadata = {
+            "method": "learned_linear_policy",
+            "trained": False,
+            "feature_dim": 6,
+            "training_pairs": 0,
+            "candidate_samples": 0,
+        }
+
+    def train_bootstrap(
+        self,
+        max_pairs: int = 2500,
+        candidates_per_pair: int = 12,
+        reg: float = 1e-3,
+    ):
+        if not self.interaction_data:
+            return
+
+        rows = []
+        targets = []
+        pairs = list(self.interaction_data.oi_pairs[:max_pairs])
+
+        for user_id, positive_item, fallback_neg in pairs:
+            excluded = {positive_item}
+            profile = self.interaction_data.get_user(user_id)
+            if profile:
+                excluded |= profile.positive_items
+                user_attrs = set(profile.positive_attributes)
+                explicit_negatives = set(profile.negative_items)
+            else:
+                user_attrs = set()
+                explicit_negatives = set()
+
+            positive_attrs = self._movie_attrs.get(positive_item, set())
+            if not user_attrs:
+                user_attrs = set(positive_attrs)
+
+            pool = list((explicit_negatives - excluded) or self._candidate_pool(positive_item, excluded))
+            if fallback_neg and fallback_neg not in excluded:
+                pool.append(fallback_neg)
+            if not pool:
+                pool = list(set(self.kg.movie_ids) - excluded)
+            self.rng.shuffle(pool)
+
+            for candidate in pool[:candidates_per_pair]:
+                base = self._score_candidate(
+                    user_id,
+                    positive_item,
+                    candidate,
+                    user_attrs,
+                    positive_attrs,
+                )
+                explicit_negative = 1.0 if candidate in explicit_negatives else 0.0
+                local_candidate = 1.0 if candidate in self._candidate_pool(positive_item, excluded) else 0.0
+                features = self._features(base, explicit_negative, local_candidate)
+
+                # Reward proxy: hard negatives should be close to the user and
+                # positive item, with explicit dislikes preferred when present.
+                target = (
+                    base.reward
+                    + 0.50 * explicit_negative
+                    + 0.15 * local_candidate
+                )
+                rows.append(features)
+                targets.append(target)
+
+        if not rows:
+            return
+
+        x = np.asarray(rows, dtype=np.float32)
+        y = np.asarray(targets, dtype=np.float32)
+        xtx = x.T @ x + reg * np.eye(x.shape[1], dtype=np.float32)
+        xty = x.T @ y
+        self.weights = np.linalg.solve(xtx, xty)
+        self.metadata = {
+            "method": "learned_linear_policy",
+            "trained": True,
+            "feature_dim": int(x.shape[1]),
+            "training_pairs": len(pairs),
+            "candidate_samples": len(rows),
+            "reg": reg,
+            "weights": [round(float(w), 4) for w in self.weights],
+        }
+
+    def sample(
+        self,
+        user_id: str,
+        positive_item: str,
+        batch_size: int = 1,
+        excluded_items: set[str] | None = None,
+    ) -> list[NegativeSample]:
+        if self.weights is None:
+            return super().sample(user_id, positive_item, batch_size, excluded_items)
+
+        excluded = set(excluded_items or set())
+        excluded.add(positive_item)
+
+        profile = self.interaction_data.get_user(user_id) if self.interaction_data else None
+        if profile:
+            excluded |= profile.positive_items
+            explicit_negatives = set(profile.negative_items)
+            user_attrs = set(profile.positive_attributes)
+        else:
+            explicit_negatives = set()
+            user_attrs = set()
+
+        positive_attrs = self._movie_attrs.get(positive_item, set())
+        if not user_attrs:
+            user_attrs = set(positive_attrs)
+
+        local_pool = self._candidate_pool(positive_item, excluded)
+        candidates = (explicit_negatives - excluded) or local_pool
+        if not candidates:
+            candidates = set(self.kg.movie_ids) - excluded
+
+        scored = []
+        for candidate in candidates:
+            base = self._score_candidate(user_id, positive_item, candidate, user_attrs, positive_attrs)
+            explicit_negative = 1.0 if candidate in explicit_negatives else 0.0
+            local_candidate = 1.0 if candidate in local_pool else 0.0
+            reward = float(self.weights @ self._features(base, explicit_negative, local_candidate))
+            scored.append(NegativeSample(
+                user_id=user_id,
+                positive_item=positive_item,
+                negative_item=candidate,
+                reward=reward,
+                user_similarity=base.user_similarity,
+                positive_similarity=base.positive_similarity,
+                graph_distance=base.graph_distance,
+            ))
+
+        scored.sort(key=lambda sample: (-sample.reward, sample.negative_item))
+        return scored[:batch_size]
+
+    @staticmethod
+    def _features(
+        sample: NegativeSample,
+        explicit_negative: float,
+        local_candidate: float,
+    ) -> np.ndarray:
+        return np.asarray([
+            1.0,
+            sample.user_similarity,
+            sample.positive_similarity,
+            sample.reward,
+            explicit_negative,
+            local_candidate,
+        ], dtype=np.float32)
+
+
+class RandomNegativeSampler:
+    """Random negative sampler baseline with the same sample_one interface."""
+
+    def __init__(self, kg, interaction_data: InteractionData | None = None, seed: int = 42):
+        self.kg = kg
+        self.interaction_data = interaction_data
+        self.rng = random.Random(seed)
+
+    def sample_one(
+        self,
+        user_id: str,
+        positive_item: str,
+        excluded_items: set[str] | None = None,
+    ) -> NegativeSample | None:
+        excluded = set(excluded_items or set())
+        excluded.add(positive_item)
+
+        profile = self.interaction_data.get_user(user_id) if self.interaction_data else None
+        if profile:
+            excluded |= profile.positive_items
+            pool = list((profile.negative_items or self.interaction_data.items) - excluded)
+        else:
+            pool = [movie_id for movie_id in self.kg.movie_ids if movie_id not in excluded]
+
+        if not pool:
+            return None
+
+        negative_item = self.rng.choice(pool)
+        return NegativeSample(
+            user_id=user_id,
+            positive_item=positive_item,
+            negative_item=negative_item,
+            reward=0.0,
+            user_similarity=0.0,
+            positive_similarity=0.0,
+            graph_distance=None,
+        )

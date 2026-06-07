@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 ALPHA_FM = 0.4        # FM (feature interaction) weight
 BETA_PROP = 0.35      # Graph propagation weight
 GAMMA_EMB = 0.25      # KG embedding similarity weight
+MAX_CONVERSATION_RANK_CANDIDATES = 800
 
 
 class RecommenderEngine:
@@ -257,7 +258,10 @@ class RecommenderEngine:
         if action == 'ask':
             # Select best question using entropy-based active sampling
             question = self.active_sampler.select_question(
-                candidates, session.asked_attributes
+                candidates,
+                session.asked_attributes,
+                fm_model=self.fm_model,
+                accepted_preferences=session.accepted_attributes,
             )
 
             if question is None:
@@ -353,6 +357,8 @@ class RecommenderEngine:
         This ensures KG topology and learned embeddings actively
         contribute to recommendation scoring.
         """
+        candidates = [mid for mid in candidates if mid not in session.recommended_movies]
+
         if not candidates:
             return {
                 'action': 'recommend',
@@ -364,6 +370,14 @@ class RecommenderEngine:
                     'error': 'No movies match your preferences. Try a new conversation!',
                 },
             }
+
+        total_candidates = len(candidates)
+        if total_candidates > MAX_CONVERSATION_RANK_CANDIDATES:
+            candidates = self._select_conversation_rank_subset(
+                session,
+                candidates,
+                MAX_CONVERSATION_RANK_CANDIDATES,
+            )
 
         # --- 1. FM scores ---
         fm_scores = {}
@@ -448,8 +462,53 @@ class RecommenderEngine:
                 'scoring_weights': {'fm': ALPHA_FM, 'propagation': BETA_PROP, 'embedding': GAMMA_EMB},
                 'preferences_used': session.accepted_attributes,
                 'turns_taken': session.turn_count,
+                'ranked_candidate_count': len(candidates),
+                'total_candidate_count': total_candidates,
             },
         }
+
+    def _select_conversation_rank_subset(
+        self,
+        session: ConversationSession,
+        candidates: list[str],
+        limit: int,
+    ) -> list[str]:
+        """Keep conversational demo responsive by ranking the most relevant candidates."""
+        accepted = {
+            f"{attr_type}:{value}".lower()
+            for attr_type, values in session.accepted_attributes.items()
+            for value in values
+        }
+        rejected = {
+            f"{attr_type}:{value}".lower()
+            for attr_type, values in session.rejected_attributes.items()
+            for value in values
+        }
+
+        def movie_attrs(movie_id: str) -> set[str]:
+            attrs = set()
+            for rel, attr_type in [
+                ('has_genre', 'genre'),
+                ('directed_by', 'person'),
+                ('starred_actors', 'person'),
+                ('release_year', 'year'),
+            ]:
+                for entity in self.kg.get_related(movie_id, rel):
+                    attrs.add(f"{attr_type}:{entity['name']}".lower())
+            return attrs
+
+        scored = []
+        for movie_id in candidates:
+            attrs = movie_attrs(movie_id)
+            score = 0
+            if accepted:
+                score += 3 * len(attrs & accepted)
+            if rejected:
+                score -= 2 * len(attrs & rejected)
+            scored.append((score, movie_id))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [movie_id for _, movie_id in scored[:limit]]
 
     @staticmethod
     def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:

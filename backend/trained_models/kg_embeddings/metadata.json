@@ -1,9 +1,9 @@
 {
   "method": "sparse_svd",
   "embedding_dim": 128,
-  "entity_count": 12479,
-  "relation_count": 9,
-  "triple_count": 37853,
+  "entity_count": 12797,
+  "relation_count": 6,
+  "triple_count": 37508,
   "epochs": 0,
-  "created_at": "2026-06-06T08:29:44.231974+00:00"
+  "created_at": "2026-06-07T04:48:39.323730+00:00"
 }

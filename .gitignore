@@ -50,3 +50,4 @@ include/
 # Local datasets
 data/movielens/
 data/_downloads/
+data/tmdb_cache/

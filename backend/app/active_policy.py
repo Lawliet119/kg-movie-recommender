@@ -55,6 +55,8 @@ class ActivePolicyNetwork:
         self.loss_fn = nn.MSELoss()
         self._trained = False
         self.training_steps = 0
+        self.training_source = "untrained"
+        self.rollout_graphs = 0
 
     @property
     def is_trained(self) -> bool:
@@ -63,10 +65,11 @@ class ActivePolicyNetwork:
     @property
     def metadata(self) -> dict:
         return {
-            "method": "bootstrap_gcn",
+            "method": self.training_source if self._trained else "untrained_gcn",
             "feature_dim": self.feature_dim,
             "hidden_dim": self.hidden_dim,
             "training_steps": self.training_steps,
+            "rollout_graphs": self.rollout_graphs,
         }
 
     def train_bootstrap(self, num_graphs: int = 160, max_nodes: int = 64, epochs: int = 20):
@@ -123,6 +126,38 @@ class ActivePolicyNetwork:
                 self.training_steps += 1
 
         self._trained = True
+        self.training_source = "bootstrap_gcn"
+
+    def train_from_labeled_graphs(
+        self,
+        graphs: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+        epochs: int = 12,
+        lr: float | None = None,
+    ):
+        """Train active sampler policy from simulator-labeled attribute graphs."""
+        if not graphs:
+            return
+
+        if lr is not None:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+
+        self.model.train()
+        for _ in range(epochs):
+            for features, adjacency, target in graphs:
+                x = torch.tensor(features, dtype=torch.float32, device=self.device)
+                a = torch.tensor(_normalize_adj(adjacency), dtype=torch.float32, device=self.device)
+                y = torch.tensor(target, dtype=torch.float32, device=self.device)
+
+                pred = self.model(x, a)
+                loss = self.loss_fn(pred, y)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                self.training_steps += 1
+
+        self.rollout_graphs += len(graphs)
+        self._trained = True
+        self.training_source = "rollout_gcn"
 
     def select(self, features: np.ndarray, adjacency: np.ndarray) -> ActivePolicyResult:
         if features.size == 0:

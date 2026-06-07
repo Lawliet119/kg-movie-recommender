@@ -71,6 +71,20 @@ export class ChatUI {
     return div.innerHTML;
   }
 
+  escapeAttr(text) {
+    return this.escapeHtml(String(text ?? ''));
+  }
+
+  emitLiveSession(event, detail = {}) {
+    window.dispatchEvent(new CustomEvent('kgensam-live-session', {
+      detail: {
+        event,
+        session_id: this.conversationSessionId,
+        ...detail,
+      },
+    }));
+  }
+
   async processMessage(text) {
     this.showTyping();
 
@@ -571,6 +585,7 @@ ${contextData}`;
 
   async startConversationalFlow() {
     this.conversationActive = true;
+    this.emitLiveSession('start');
 
     this.addMessage(
       `<span class="kg-badge with-kg kgensam-badge">🧠 KGenSam Conversational Mode</span><br><br>` +
@@ -587,6 +602,7 @@ ${contextData}`;
       });
       const data = await res.json();
       this.conversationSessionId = data.session?.session_id;
+      this.emitLiveSession('session', { session: data.session });
       this.renderConversationStep(data);
     } catch (e) {
       console.error('Failed to start conversation:', e);
@@ -597,9 +613,23 @@ ${contextData}`;
 
   renderConversationStep(data) {
     if (data.action === 'ask' && data.question) {
+      this.emitLiveSession('ask', {
+        question: data.question,
+        session: data.session,
+      });
       this.renderAttributeQuestion(data);
     } else if (data.action === 'recommend' && data.recommendations) {
+      this.emitLiveSession('recommend', {
+        recommendations: data.recommendations,
+        session: data.session,
+      });
       this.renderConversationalRecommendations(data);
+    } else if (data.action === 'accepted') {
+      this.emitLiveSession('accepted', {
+        movie: data.movie,
+        session: data.session,
+      });
+      this.addMessage(`Nice pick: <strong>${this.escapeHtml(data.movie?.name || 'this movie')}</strong>.`, 'bot', true);
       this.conversationActive = false;
       this.conversationSessionId = null;
     }
@@ -622,6 +652,10 @@ ${contextData}`;
       }
     }
 
+    const policyLine = session.last_policy
+      ? `<br><span style="opacity:0.6;font-size:11px;">Interact Policy: ${this.escapeHtml(String(session.last_policy.action || 'ask')).toUpperCase()} · ${this.escapeHtml(session.last_policy.method || 'policy')}</span>`
+      : '';
+
     const html = `
       <div class="conversation-question-card">
         <div class="conversation-progress">
@@ -631,13 +665,13 @@ ${contextData}`;
         ${prefTags ? `<div class="conversation-prefs">${prefTags}</div>` : ''}
         <div class="conversation-question-text">${q.question_text}</div>
         <div class="conversation-question-meta">
-          <span style="opacity:0.6;font-size:11px;">Entropy: ${q.entropy} · Split: ${Math.round(q.split_ratio * 100)}% · ${q.movies_with_attr}/${q.candidate_count} movies</span>
+          <span style="opacity:0.6;font-size:11px;">Entropy: ${q.entropy} · Split: ${Math.round(q.split_ratio * 100)}% · ${q.movies_with_attr}/${q.candidate_count} movies</span>${policyLine}
         </div>
         <div class="conversation-buttons">
-          <button class="conversation-btn accept" data-attr-type="${q.attr_type}" data-attr-value="${q.attr_value}" data-accepted="true">
+          <button class="conversation-btn accept" data-attr-type="${this.escapeAttr(q.attr_type)}" data-attr-value="${this.escapeAttr(q.attr_value)}" data-accepted="true">
             ✅ Yes, I like it!
           </button>
-          <button class="conversation-btn reject" data-attr-type="${q.attr_type}" data-attr-value="${q.attr_value}" data-accepted="false">
+          <button class="conversation-btn reject" data-attr-type="${this.escapeAttr(q.attr_type)}" data-attr-value="${this.escapeAttr(q.attr_value)}" data-accepted="false">
             ❌ Not really
           </button>
         </div>
@@ -645,6 +679,9 @@ ${contextData}`;
     `;
 
     const msg = this.addMessage(html, 'bot', true);
+    if (this.mode === 'kg' && this.graphViz?.showConversationQuestion) {
+      this.graphViz.showConversationQuestion(q, session);
+    }
 
     // Attach event listeners
     msg.querySelectorAll('.conversation-btn').forEach(btn => {
@@ -665,6 +702,11 @@ ${contextData}`;
         // Show user's choice
         const choiceText = accepted ? `✅ Yes, I like ${attrValue}` : `❌ No, not ${attrValue}`;
         this.addMessage(choiceText, 'user', true);
+        this.emitLiveSession('attribute_feedback', {
+          attr_type: attrType,
+          attr_value: attrValue,
+          accepted,
+        });
 
         await this.handleConversationAnswer(attrType, attrValue, accepted);
       });
@@ -725,6 +767,11 @@ ${contextData}`;
       html += `<div style="margin-bottom:12px;"><span style="opacity:0.7;font-size:12px;">Your preferences:</span><br>${prefHtml}</div>`;
     }
 
+    const policy = session.last_policy;
+    if (policy) {
+      html += `<div class="conversation-policy-line">Interact Policy: ${this.escapeHtml(String(policy.action || 'recommend')).toUpperCase()} · ${this.escapeHtml(policy.method || 'policy')}</div>`;
+    }
+
     // Movie cards
     for (let i = 0; i < recs.results.length; i++) {
       const r = recs.results[i];
@@ -732,21 +779,82 @@ ${contextData}`;
         ? `<span class="rec-score">${Number(r.score).toFixed(3)}</span>`
         : '';
 
-      html += `<div class="recommendation-card">`;
-      html += `<div class="rec-header"><span class="rec-title">${i + 1}. ${r.movie.name}</span>${scoreHtml}</div>`;
+      html += `<div class="recommendation-card" data-movie-id="${this.escapeAttr(r.movie.id)}" data-movie-name="${this.escapeAttr(r.movie.name)}">`;
+      html += `<div class="rec-header"><span class="rec-title">${i + 1}. ${this.escapeHtml(r.movie.name)}</span>${scoreHtml}</div>`;
 
       if (r.reasons && r.reasons.length > 0) {
         html += `<div class="rec-reasons">`;
         for (const reason of r.reasons) {
-          html += `<span class="reason-tag ${reason.type}">${reason.text}</span>`;
+          html += `<span class="reason-tag ${this.escapeAttr(reason.type)}">${this.escapeHtml(reason.text)}</span>`;
         }
         html += `</div>`;
+      }
+      if (this.conversationSessionId) {
+        html += `
+          <div class="rec-feedback-buttons">
+            <button class="rec-feedback-btn accept" data-accepted="true">Looks good</button>
+            <button class="rec-feedback-btn reject" data-accepted="false">Not for me</button>
+          </div>
+        `;
       }
       html += `</div>`;
     }
 
     html += `<br><span style="opacity:0.6;font-size:11px;">Method: ${recs.method} · Turns: ${recs.turns_taken || session.turn_count}</span>`;
 
-    this.addMessage(html, 'bot', true);
+    const msg = this.addMessage(html, 'bot', true);
+    if (this.mode === 'kg' && this.graphViz?.showConversationalRecommendations) {
+      this.graphViz.showConversationalRecommendations(recs, session);
+    }
+    msg.querySelectorAll('.rec-feedback-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const card = e.currentTarget.closest('.recommendation-card');
+        const movieId = card?.dataset.movieId;
+        const movieName = card?.dataset.movieName || 'this movie';
+        const accepted = e.currentTarget.dataset.accepted === 'true';
+        if (!movieId) return;
+
+        msg.querySelectorAll('.rec-feedback-btn').forEach(b => {
+          b.disabled = true;
+          b.style.opacity = '0.5';
+        });
+        e.currentTarget.style.opacity = '1';
+        e.currentTarget.classList.add('selected');
+
+        this.addMessage(accepted ? `Looks good: ${movieName}` : `Not for me: ${movieName}`, 'user');
+        this.emitLiveSession('item_feedback', {
+          movie_id: movieId,
+          movie_name: movieName,
+          accepted,
+        });
+        await this.handleMovieFeedback(movieId, accepted);
+      });
+    });
+  }
+
+  async handleMovieFeedback(movieId, accepted) {
+    if (!this.conversationSessionId) return;
+    this.showTyping();
+
+    try {
+      const res = await fetch('/api/conversation/movie-feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: this.conversationSessionId,
+          movie_id: movieId,
+          accepted,
+        }),
+      });
+      const data = await res.json();
+      this.removeTyping();
+      this.renderConversationStep(data);
+    } catch (e) {
+      this.removeTyping();
+      console.error('Movie feedback failed:', e);
+      this.addMessage('Could not process that movie feedback. Try starting a new recommendation flow.', 'bot');
+      this.conversationActive = false;
+      this.conversationSessionId = null;
+    }
   }
 }

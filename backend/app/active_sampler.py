@@ -124,6 +124,8 @@ class ActiveSampler:
         self,
         candidate_movies: list[str],
         asked_attributes: set[str],
+        fm_model = None,
+        accepted_preferences: Optional[dict[str, list[str]]] = None,
     ) -> Optional[dict]:
         """
         Select the best attribute question to ask using KGenSam criteria:
@@ -178,13 +180,28 @@ class ActiveSampler:
                 split_ratio = count / n
 
                 # Information gain (binary entropy)
-                if split_ratio <= 0 or split_ratio >= 1:
-                    info_gain = 0.0
-                else:
+                if fm_model and fm_model.is_trained and accepted_preferences:
+                    # Calculate attribute uncertainty from FM model (KGenSam paper)
+                    attr_key = f"{attr_type}:{attr_name}"
+                    user_vec = fm_model._encode_preferences(accepted_preferences)
+                    attr_vec = fm_model._encode_attribute_key(attr_key)
+                    x = user_vec + attr_vec
+                    pred_score = fm_model._predict(x)
+                    y_hat = fm_model._sigmoid(pred_score)
+                    y_hat = max(1e-5, min(1.0 - 1e-5, y_hat))
                     info_gain = -(
-                        split_ratio * math.log2(split_ratio)
-                        + (1 - split_ratio) * math.log2(1 - split_ratio)
+                        y_hat * math.log2(y_hat)
+                        + (1 - y_hat) * math.log2(1 - y_hat)
                     )
+                else:
+                    # Fallback to candidate split-ratio entropy
+                    if split_ratio <= 0 or split_ratio >= 1:
+                        info_gain = 0.0
+                    else:
+                        info_gain = -(
+                            split_ratio * math.log2(split_ratio)
+                            + (1 - split_ratio) * math.log2(1 - split_ratio)
+                        )
 
                 # Node degree in KG
                 degree = 0

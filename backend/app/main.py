@@ -16,6 +16,7 @@ Endpoints:
 import os
 import logging
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -23,7 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .kg_builder import KnowledgeGraph, build_knowledge_graph, load_kb_file
+from .kg_builder import KnowledgeGraph, build_knowledge_graph
 from .kg_embeddings import KGEmbeddingModel
 from .semantic_nlu import SemanticNLU
 from .recommender import RecommenderEngine
@@ -33,12 +34,15 @@ from .fm_model import FMModel
 from .interaction_data import build_synthetic_interaction_data
 from .movielens_kg import load_movielens_movie_triples
 from .movielens_loader import load_movielens_interaction_data
-from .negative_sampler import NegativeSampler
+from .negative_sampler import NegativeSampler, RandomNegativeSampler, LearnedNegativeSampler
 from .evaluation import EvaluationConfig, EvaluationRunner
+from .tmdb_kg import load_tmdb_movie_triples
+from .policy_training import PolicyRolloutTrainer, PolicyTrainingConfig
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- Global state ---
 kg: KnowledgeGraph
@@ -51,24 +55,25 @@ fm_model: FMModel
 interaction_data = None
 negative_sampler: NegativeSampler
 kg_source_metadata = {}
+policy_training_metadata = {}
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_DIR = os.path.dirname(BACKEND_DIR)
-KB_PATH = os.path.join(PROJECT_DIR, 'scripts', 'kb.txt')
 EMBEDDINGS_DIR = os.path.join(BACKEND_DIR, 'trained_models', 'kg_embeddings')
 MOVIELENS_DIR = os.path.join(PROJECT_DIR, 'data', 'movielens')
+TMDB_CACHE_DIR = os.path.join(PROJECT_DIR, 'data', 'tmdb_cache')
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global kg, embedding_model, nlu, engine, session_store, active_sampler, fm_model, interaction_data, negative_sampler, kg_source_metadata
+    global kg, embedding_model, nlu, engine, session_store, active_sampler, fm_model, interaction_data, negative_sampler, kg_source_metadata, policy_training_metadata
 
     logger.info("🚀 Starting KG Movie Recommender Backend...")
 
     # 1. Build Knowledge Graph
     logger.info("📦 Building Knowledge Graph...")
-    raw_triples = load_kb_file(KB_PATH, top_n=200)
+    raw_triples = []
     movielens_triples, movielens_kg_metadata = load_movielens_movie_triples(MOVIELENS_DIR)
     if movielens_triples:
         raw_triples = raw_triples + movielens_triples
@@ -80,6 +85,30 @@ async def lifespan(app: FastAPI):
         )
     else:
         kg_source_metadata = movielens_kg_metadata
+
+    tmdb_triples, tmdb_kg_metadata = load_tmdb_movie_triples(
+        MOVIELENS_DIR,
+        TMDB_CACHE_DIR,
+        api_key=os.getenv("TMDB_API_KEY"),
+        max_movies=int(os.getenv("TMDB_MAX_MOVIES", "500")),
+    )
+    if tmdb_triples:
+        raw_triples = raw_triples + tmdb_triples
+        logger.info(
+            "Expanded KG with TMDB external KG: "
+            f"movies={tmdb_kg_metadata.get('requested_movies')}, "
+            f"triples={tmdb_kg_metadata.get('triples')}"
+        )
+    else:
+        logger.info(
+            "TMDB external KG not loaded: "
+            f"{tmdb_kg_metadata.get('reason', tmdb_kg_metadata.get('source'))}"
+        )
+    kg_source_metadata = {
+        "standard_dataset_only": True,
+        "movielens": movielens_kg_metadata,
+        "tmdb": tmdb_kg_metadata,
+    }
     kg = build_knowledge_graph(raw_triples)
     logger.info(f"📊 KG Stats: {kg.stats}")
 
@@ -88,7 +117,11 @@ async def lifespan(app: FastAPI):
     embedding_model = KGEmbeddingModel(embedding_dim=128, model_name='RotatE')
 
     # Try to load pre-trained, otherwise train new
-    if not embedding_model.load(EMBEDDINGS_DIR, expected_entities=kg.entities.keys()):
+    if not embedding_model.load(
+        EMBEDDINGS_DIR,
+        expected_entities=kg.entities.keys(),
+        strict_entity_count=True,
+    ):
         logger.info("🏋️ No pre-trained embeddings found. Training...")
         triples_list = kg.to_triples_list()
         use_fast_fallback = len(kg.entities) > 5000
@@ -129,7 +162,9 @@ async def lifespan(app: FastAPI):
             f"OI={len(interaction_data.oi_pairs)}, "
             f"OA={len(interaction_data.oa_pairs)}"
         )
-    negative_sampler = NegativeSampler(kg, interaction_data)
+    negative_sampler = LearnedNegativeSampler(kg, interaction_data, kg_embeddings=embedding_model)
+    negative_sampler.train_bootstrap(max_pairs=2500, candidates_per_pair=12)
+    logger.info(f"Negative sampler policy: {negative_sampler.metadata}")
     fm_model = FMModel(k=16, lr=0.01, reg=0.01)
     fm_model.build_feature_index(kg, interaction_data=interaction_data)
     fm_epochs = 2 if interaction_data.source == "movielens" else 15
@@ -146,6 +181,18 @@ async def lifespan(app: FastAPI):
         active_sampler=active_sampler,
         fm_model=fm_model,
     )
+    policy_training_metadata = PolicyRolloutTrainer(engine, interaction_data).train(
+        PolicyTrainingConfig(
+            max_users=int(os.getenv("POLICY_RL_USERS", "45")),
+            max_turns=int(os.getenv("POLICY_RL_MAX_TURNS", "5")),
+            max_candidate_pool=int(os.getenv("POLICY_RL_POOL", "180")),
+            max_active_graphs=int(os.getenv("POLICY_RL_ACTIVE_GRAPHS", "160")),
+            interact_epochs=int(os.getenv("POLICY_RL_INTERACT_EPOCHS", "25")),
+            active_epochs=int(os.getenv("POLICY_RL_ACTIVE_EPOCHS", "10")),
+            seed=int(os.getenv("POLICY_RL_SEED", "42")),
+        )
+    )
+    logger.info(f"Policy rollout training: {policy_training_metadata}")
 
     logger.info("✅ All systems ready! (KGenSam Level 2 enabled)")
     yield
@@ -205,11 +252,25 @@ class ConversationAnswerRequest(BaseModel):
     attr_value: str
 
 
+class MovieFeedbackRequest(BaseModel):
+    session_id: str
+    movie_id: str
+    accepted: bool
+
+
 class EvaluationRequest(BaseModel):
     max_users: int = 20
     max_turns: int = 5
     max_candidate_pool: int = 200
     seed: int = 42
+
+
+class NegativeSamplerAblationRequest(BaseModel):
+    max_users: int = 10
+    max_turns: int = 5
+    max_candidate_pool: int = 200
+    seed: int = 42
+    random_fm_epochs: int = 1
 
 
 # --- API Endpoints ---
@@ -390,6 +451,8 @@ async def health():
         'oi_pairs': len(interaction_data.oi_pairs) if interaction_data else 0,
         'oa_pairs': len(interaction_data.oa_pairs) if interaction_data else 0,
         'interaction_metadata': interaction_data.metadata if interaction_data else {},
+        'negative_sampler': negative_sampler.metadata if negative_sampler else {},
+        'policy_training': policy_training_metadata,
         'active_sessions': session_store.active_count if session_store else 0,
     }
 
@@ -404,6 +467,66 @@ async def evaluate(req: EvaluationRequest):
         max_candidate_pool=req.max_candidate_pool,
         seed=req.seed,
     ))
+
+
+@app.post("/api/evaluate/negative-sampler-ablation")
+async def evaluate_negative_sampler_ablation(req: NegativeSamplerAblationRequest):
+    """
+    Compare the current hard-negative FM against a random-negative FM baseline.
+
+    This is a demo-scale ablation for reporting, not a full paper benchmark.
+    """
+    started = time.time()
+    config = EvaluationConfig(
+        max_users=req.max_users,
+        max_turns=req.max_turns,
+        max_candidate_pool=req.max_candidate_pool,
+        seed=req.seed,
+    )
+    original_fm = engine.fm_model
+
+    hard_result = EvaluationRunner(engine, interaction_data).run(config)
+
+    random_fm = FMModel(k=16, lr=0.01, reg=0.01)
+    random_fm.build_feature_index(kg, interaction_data=interaction_data)
+    random_fm.train(
+        kg,
+        epochs=req.random_fm_epochs,
+        interaction_data=interaction_data,
+        negative_sampler=RandomNegativeSampler(kg, interaction_data, seed=req.seed),
+    )
+
+    try:
+        engine.fm_model = random_fm
+        random_result = EvaluationRunner(engine, interaction_data).run(config)
+    finally:
+        engine.fm_model = original_fm
+
+    return {
+        "config": {
+            "max_users": req.max_users,
+            "max_turns": req.max_turns,
+            "max_candidate_pool": req.max_candidate_pool,
+            "seed": req.seed,
+            "random_fm_epochs": req.random_fm_epochs,
+        },
+        "results": [
+            {
+                "sampler": "learned_negative_current",
+                "description": "Current learned KGenSam-style negative sampler used by the running FM model.",
+                "metrics": hard_result["metrics"],
+                "elapsed_seconds": hard_result["elapsed_seconds"],
+            },
+            {
+                "sampler": "random_negative_baseline",
+                "description": "Random negative sampler baseline trained quickly for demo ablation.",
+                "metrics": random_result["metrics"],
+                "elapsed_seconds": random_result["elapsed_seconds"],
+            },
+        ],
+        "note": "Demo-scale ablation only; not a full reproduction of paper experiments.",
+        "elapsed_seconds": round(time.time() - started, 3),
+    }
 
 
 # --- KGenSam Conversational Endpoints ---
@@ -446,6 +569,36 @@ async def conversation_answer(req: ConversationAnswerRequest):
     # Execute next conversation step
     result = engine.conversational_step(session)
 
+    return result
+
+
+@app.post("/api/conversation/movie-feedback")
+async def conversation_movie_feedback(req: MovieFeedbackRequest):
+    """Process feedback on a recommended movie and optionally return alternatives."""
+    session = session_store.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    movie = kg.entities.get(req.movie_id)
+    if not movie or movie.get("type") != "movie":
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    if req.accepted:
+        session.recommended_movies.add(req.movie_id)
+        return {
+            "action": "accepted",
+            "session": session.to_dict(),
+            "movie": movie,
+            "message": f"Great, {movie['name']} is accepted.",
+        }
+
+    session.recommended_movies.add(req.movie_id)
+    result = engine.conversational_step(session)
+    result["feedback"] = {
+        "type": "item",
+        "accepted": False,
+        "movie": movie,
+    }
     return result
 
 
